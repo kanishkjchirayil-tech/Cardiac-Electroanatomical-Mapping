@@ -1,8 +1,11 @@
 import { useEffect, useRef } from 'preact/hooks';
-import { useSignalEffect } from '@preact/signals';
+import { useSignalEffect, untracked } from '@preact/signals';
 import { Viewer } from '../render/viewer';
 import { standardViews, type ViewName } from '../render/views';
-import { regionColors, scalarColors, shellColors, viridis, cssGradient } from '../render/colormaps';
+import { regionColors, scalarColors, shellColors, viridis, cssGradient, writeColors, voltageColor, latColor, FIBROTIC, UNMAPPED, SHELL_COLOR } from '../render/colormaps';
+import { initSimulation, latestVm } from './sim-client';
+import { SimPanel } from './SimPanel';
+import { vToMv } from '../core/ep/ionic';
 import { REGIONS, Region } from '../core/mesh/regions';
 import { formatFromName, importMesh, parseMeshFile, type LabelSidecar } from '../core/mesh/io/import';
 import { meshQuality } from '../core/mesh/quality';
@@ -13,9 +16,51 @@ import * as S from './state';
 const THICKNESS_RANGE: [number, number] = [0.5, 3.0];
 const NARROW = typeof window !== 'undefined' && window.matchMedia('(max-width: 800px)').matches;
 
+let teacherBuf = new Float32Array(0);
+
+/** Range of the true activation map for the most recent beat (teacher view only). */
+function latRange(): { lo: number; hi: number } | null {
+  const a = S.gtActivation.value;
+  if (!a) return null;
+  let lo = Infinity, hi = -Infinity;
+  for (const x of a.last) if (Number.isFinite(x) && x >= a.beatStart) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
+  return Number.isFinite(lo) ? { lo, hi } : null;
+}
+
+function teacherColors(n: number): Float32Array | null {
+  if (teacherBuf.length !== 3 * n) teacherBuf = new Float32Array(3 * n);
+  const out = teacherBuf;
+  switch (S.teacherOverlay.value) {
+    case 'vm': {
+      void S.vmFrameId.value;
+      const vm = latestVm;
+      if (!vm || vm.length !== n) return null;
+      writeColors(out, n, (i) => voltageColor(vm[i]!));
+      return out;
+    }
+    case 'lat': {
+      const a = S.gtActivation.value, r = latRange();
+      if (!a || !r || a.last.length !== n) return null;
+      const span = Math.max(1, r.hi - r.lo);
+      writeColors(out, n, (i) => (a.fibrotic[i] ? FIBROTIC : a.last[i]! >= a.beatStart && Number.isFinite(a.last[i]!) ? latColor((a.last[i]! - r.lo) / span) : UNMAPPED));
+      return out;
+    }
+    case 'substrate': {
+      const a = S.gtActivation.value;
+      if (!a || a.fibrotic.length !== n) return null;
+      writeColors(out, n, (i) => (a.fibrotic[i] ? FIBROTIC : SHELL_COLOR));
+      return out;
+    }
+  }
+}
+
 function colorsFor(): Float32Array | null {
   const m = S.mesh.value;
   if (!m) return null;
+  if (S.teacherView.value) {
+    const c = teacherColors(m.region.length);
+    if (c) return c;
+  }
   switch (S.overlay.value) {
     case 'shell': return shellColors(m.region.length);
     case 'regions': return regionColors(m.region, S.highlightRegion.value);
@@ -92,8 +137,12 @@ export function App() {
     const m = S.mesh.value;
     const v = viewer.current;
     if (!m || !v) return;
-    v.setMesh(m, colorsFor()!);
-    v.setView('AP', S.obliqueDeg.peek());
+    // Only the mesh is a dependency here; colours are tracked by the effect below.
+    untracked(() => {
+      v.setMesh(m, colorsFor()!);
+      v.setView('AP', S.obliqueDeg.peek());
+      initSimulation(m);
+    });
   });
   useSignalEffect(() => {
     const c = colorsFor();
@@ -117,6 +166,7 @@ export function App() {
       </header>
 
       <aside class="sidebar">
+        <SimPanel />
         <AnatomyPanel />
         <DisplayPanel />
         <ClipPanel viewer={viewer} />
@@ -254,6 +304,35 @@ function ViewToolbar({ viewer }: { viewer: { current: Viewer | null } }) {
 function Legend() {
   const m = S.mesh.value;
   if (!m) return null;
+  if (S.teacherView.value) {
+    const ov = S.teacherOverlay.value;
+    if (ov === 'vm') {
+      return (
+        <details class="legend teacher-legend" open>
+          <summary class="legend-title">Teacher · transmembrane voltage</summary>
+          <div class="bar" style={{ background: cssGradient(voltageColor) }} />
+          <div class="bar-labels"><span>−80 mV</span><span>+20 mV</span></div>
+        </details>
+      );
+    }
+    if (ov === 'lat') {
+      const r = latRange();
+      return (
+        <details class="legend teacher-legend" open>
+          <summary class="legend-title">Teacher · true activation (last beat)</summary>
+          <div class="bar" style={{ background: cssGradient(latColor) }} />
+          <div class="bar-labels"><span>{r ? '0 ms' : '—'}</span><span>{r ? `${(r.hi - r.lo).toFixed(0)} ms` : 'run the simulation'}</span></div>
+          <div class="legend-note"><span class="swatch" style={{ background: 'rgb(56,56,61)' }} /> fibrotic / inexcitable</div>
+        </details>
+      );
+    }
+    return (
+      <details class="legend teacher-legend" open>
+        <summary class="legend-title">Teacher · substrate</summary>
+        <div class="legend-note"><span class="swatch" style={{ background: 'rgb(56,56,61)' }} /> fibrotic / inexcitable node</div>
+      </details>
+    );
+  }
   if (S.overlay.value === 'thickness') {
     return (
       <details class="legend" open>
@@ -287,12 +366,23 @@ function StatusBar() {
   if (h && m) {
     const r = REGIONS[m.region[h.vertex]!]?.name ?? REGIONS[Region.Unlabeled]!.name;
     hoverText = `${r} · wall ${m.wallThickness[h.vertex]!.toFixed(2)} mm · vertex ${h.vertex} · (${h.point.map((x) => x.toFixed(1)).join(', ')}) mm LPS`;
+    if (S.teacherView.value) {
+      void S.vmFrameId.value;
+      const a = S.gtActivation.value;
+      if (S.teacherOverlay.value === 'vm' && latestVm) hoverText += ` · Vm ${vToMv(latestVm[h.vertex] ?? 0).toFixed(0)} mV`;
+      if (S.teacherOverlay.value === 'lat' && a) {
+        const r = latRange();
+        const t = a.last[h.vertex]!;
+        hoverText += a.fibrotic[h.vertex] ? ' · fibrotic' : r && Number.isFinite(t) && t >= a.beatStart ? ` · true LAT ${(t - r.lo).toFixed(1)} ms` : ' · not activated';
+      }
+    }
   }
   return (
     <footer class="statusbar">
       <span>{hoverText}</span>
       <span class="spacer" />
-      <span>{S.fps.value.toFixed(0)} fps</span>
+      <span>sim {(S.simTime.value / 1000).toFixed(2)} s{S.simRunning.value ? ` · ${S.simSpeed.value.toFixed(2)}×` : ' · paused'}</span>
+      <span>{S.fps.value > 0 ? `${S.fps.value.toFixed(0)} fps` : "idle"}</span>
     </footer>
   );
 }

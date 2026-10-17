@@ -7,7 +7,7 @@ This document lists every modeling assumption, equation, and parameter in the si
 milestone adds its own section. Sections marked *(planned)* are not implemented yet.
 
 - [1. Anatomy](#1-anatomy) — implemented (M1)
-- [2. Electrophysiology engine](#2-electrophysiology-engine) — *(planned, M2)*
+- [2. Electrophysiology engine](#2-electrophysiology-engine) — implemented (M2)
 - [3. Catheters and signals](#3-catheters-and-signals) — *(planned, M3)*
 - [4. Mapping](#4-mapping) — *(planned, M4)*
 - [5. Ablation](#5-ablation) — *(planned, M5)*
@@ -222,9 +222,220 @@ signed volume is negative. Imported meshes are **not** remeshed: the importer wa
 far from the ~1 mm that the solver is calibrated for.
 
 ## 2. Electrophysiology engine
-*(planned, M2.)* Monodomain reaction–diffusion on the surface with a cotangent-Laplacian P1 FEM
-(lumped mass), Mitchell–Schaeffer ionic model by default, auto-calibrated conduction velocity, and an
-eikonal fast-marching mode.
+
+Code lives in `src/core/ep/` (framework-free) and is hosted by `src/engine/` inside a Web Worker.
+
+### 2.1 Monodomain equation and discretization
+
+Transmembrane potential is represented by a normalized variable v ∈ [0, 1], with
+Vm = −80 mV + 100 mV · v (§2.2). On the atrial surface S:
+
+∂v/∂t = ∇·(D(x) ∇v) + f_ion(v, g) + I_stim,  with no-flux boundaries at the PV and MV openings.
+
+- **Space (P1 FEM, lumped mass).** For vertex i with lumped area M_i (one third of the incident
+  triangle areas):
+
+  M_i dv_i/dt = Σ_j w_ij D_ij (v_j − v_i),  with w_ij = ½ (cot α_ij + cot β_ij)
+
+  This is the cotangent formula (Pinkall & Polthier 1993). Its no-flux (Neumann) condition at open
+  boundaries is built into the weak form.
+  - Cotangent weights are clamped at 0. On the remeshed atrium none are negative, because the final
+    Delaunay flips (§1.3) remove them (`tests/ep-fem.test.ts`).
+- **Per-edge diffusivity.** D_ij = D₀ · HM(σ_i, σ_j) · s_ij, where:
+  - HM is the harmonic mean;
+  - σ is the per-vertex conductivity scale (later also multiplied by a lesion factor);
+  - s_ij ∈ {0, 1} is structural coupling (interstitial fibrosis, lesions);
+  - D_ij = 0 if either endpoint is inexcitable.
+- **Time (Godunov operator splitting; Qu & Garfinkel 1999).** Each step dt runs three sub-steps in
+  this order:
+  1. Diffusion: n_sub forward-Euler substeps, with n_sub = ⌈dt / Δt_stable⌉.
+  2. Stimulus current.
+  3. Reaction: forward Euler for v; exact exponential (Rush & Larsen 1978) for gating variables.
+- **Stability bound.** Δt_stable = 0.9 · 2/ρ, where ρ is the Gershgorin bound 2·max_i Σ_j w_ij D_ij / M_i.
+  With the defaults n_sub = 1 everywhere (Mitchell–Schaeffer: Δt_stable ≈ 0.4 ms at D₀ = 0.51).
+- **Activation and repolarization times.** These are recorded where v crosses 0.5 upward and 0.1
+  downward, linearly interpolated within the step. They are ground truth, visible only in the
+  teacher view and in tests.
+
+Both backends implement exactly this scheme:
+
+- **CPU:** typed arrays in a worker (`solver-cpu.ts`).
+- **WebGPU** (`solver-gpu.ts`):
+  - One fused compute pass per step: last diffusion substep, stimulus, reaction, and crossing
+    detection.
+  - Per-step uniforms use dynamic offsets, so a batch of up to 512 steps goes into one command buffer.
+  - Storage is packed into the default limit of 8 buffers per stage.
+  - Validated against the CPU backend by the browser self-test (`selftest.html`). On the 16.5k-vertex
+    LA, activation times agree within 2·10⁻⁴ ms; on the Fenton–Karma sheet, within 0.03 ms.
+
+### 2.2 Ionic models (`IonicModel` interface)
+
+Each model provides a vectorized CPU kernel and a WGSL kernel with an identical update rule.
+`apdScale` (per vertex) multiplies the model's repolarization time constant.
+
+**Mitchell–Schaeffer (default; Mitchell & Schaeffer 2003).**
+
+dv/dt = h v²(1−v)/τ_in − v/τ_out
+
+dh/dt = (1−h)/τ_open if v < v_gate, else −h/τ_close
+
+Default parameters: τ_in = 0.3, τ_out = 6, τ_open = 120, τ_close = 130 ms, v_gate = 0.13.
+dt = 0.1 ms. Measured against dt = 0.02 ms, CV changes by < 1 % and APD90 and ERP are unchanged.
+
+The analytic maximal APD τ_close ln(τ_out/4τ_in) = 209 ms underestimates the single-cell APD90 by
+about 20 %, because the formula ignores the repolarization downstroke.
+
+**Aliev–Panfilov (Aliev & Panfilov 1996).**
+
+du/dτ = k u(1−u)(u−a) − u r
+
+dr/dτ = (ε₀ + μ₁ r/(u+μ₂)) (−r − k u(u−a−1))
+
+Parameters: k = 8, a = 0.15, ε₀ = 0.002, μ₁ = 0.2, μ₂ = 0.3, τ = t/9 ms. dt = 0.05 ms.
+
+**Fenton–Karma 3V (Fenton & Karma 1998).** Uses parameter set 1 of Fenton et al. 2002 as transcribed
+here, with τ_w⁺ and τ_r scaled by 0.94 to bring APD90 into the atrial range. dt = 0.05 ms.
+
+- These transcribed values should be **checked against the source** before any research use.
+- APD is very sensitive to the scale: 0.85 gives 129 ms and 0.90 gives 169 ms.
+
+### 2.3 Substrate (`Substrate`, `tissue.ts`)
+
+| Field (per vertex) | Meaning |
+|---|---|
+| `conductivity` σ | multiplies D₀ (CV ∝ √σ) |
+| `apdScale` | multiplies the repolarization time constant (ERP/APD heterogeneity; used by the autonomic module in M7) |
+| `fibrosisDensity` 0..1 | expected fraction of affected nodes (diffuse, patchy) or edges (interstitial) |
+| `fibrosisDepth` 0..1 | transmural extent; default 0.3 + 0.7·density where fibrotic. Used for EGM attenuation (M3). |
+| `lesionCore`, `lesionConductivity` | written by ablation (M5) |
+
+**Fibrosis patterns** (`tests/ep-substrate.test.ts`):
+
+- **Diffuse:** each node becomes fibrotic independently with probability = density.
+- **Patchy:** seeded fractal value noise (feature size 6 mm) is rank-transformed to a uniform
+  percentile. A node is fibrotic where its percentile < the local density. This produces clustered
+  patches whose local area fraction tracks the density field. The realized fraction is within ±3 % of
+  the target.
+- **Interstitial:** each edge is uncoupled with probability min(1, 2ρ sin²φ), where φ is its angle
+  to the local fibre direction. Transverse coupling is lost; nodes stay excitable.
+
+Fibrotic nodes are **inexcitable and electrically isolated**: all incident edges have zero conductance.
+This "structural block" representation follows common discrete-fibrosis atrial models.
+
+**Fibre field.** The direction is circumferential around each PV within 12 mm of the ostium, and
+otherwise horizontal-circumferential. It is used only for interstitial fibrosis; conduction is
+isotropic (see limitations).
+
+**Tissue presets.** Values were measured by the tissue lab on a flat strip at h = 0.955 mm (S1 = 600 ms):
+
+| Preset | Ionic parameters | dt (ms) | Target CV (m/s) | D₀ (mm²/ms) | Measured CV | APD90 (ms) | ERP (ms) | Shortest S2: DI / APD90 / CV | λ = CV·APD90 (cm) |
+|---|---|---|---|---|---|---|---|---|---|
+| Healthy | MS, τ_close 130, τ_open 120 | 0.1 | 0.75 | 0.515 | 0.750 | 251 | 260 | 67 / 157 / 0.41 | 18.8 |
+| Paroxysmal | MS, τ_close 95, τ_open 110; 5 % patchy fibrosis | 0.1 | 0.70 | 0.454 | 0.700 | 190 | 210 | 67 / 125 / 0.40 | 13.3 |
+| Persistent | MS, τ_close 55, τ_open 90; 20 % patchy fibrosis | 0.1 | 0.50 | 0.243 | 0.500 | 120 | 140 | 69 / 88 / 0.32 | 6.0 |
+| (alt.) Aliev–Panfilov | defaults | 0.05 | 0.75 | 2.55 | 0.748 | 221 | 320 | 205 / 94 / 0.64 | 16.5 |
+| (alt.) Fenton–Karma | set 1, scale 0.94 | 0.05 | 0.75 | 0.327 | 0.748 | 209 | 210 | 20 / 154 / 0.56 | 15.6 |
+
+How the presets map to the literature:
+
+- **Healthy CV.** 0.75 m/s lies in the commonly cited range of about 0.6–1.0 m/s for atrial myocardium
+  (Dössel et al. 2012).
+- **Remodeled presets.** These reproduce the qualitative effects of AF-induced electrical remodeling:
+  shortened APD and ERP, with loss of rate adaptation (Wijffels et al. 1995).
+- **Wavelength.** The wavelength concept (Rensma et al. 1988) explains why rotors need the persistent
+  substrate: λ ≈ 6 cm fits on the atrium, while λ ≈ 19 cm does not.
+- **Fibrosis distribution.** The posterior wall and antra are weighted up (×1.3–1.8). These weights
+  are an educational choice, not fitted to imaging data.
+
+**Anatomical reentry in healthy tissue.** Macro-reentry around a large obstacle still sustains with
+healthy parameters, because APD shortens at short diastolic intervals. The ring tests show this for a
+12.6 cm circuit with cycle length ≈ 260 ms, which is consistent with flutter occurring in
+non-remodeled atria.
+
+### 2.4 Calibration and measurement tools (`calibrate.ts`)
+
+All measurements use a 40 × 5 mm equilateral-lattice strip with the same edge length as the atrial
+mesh.
+
+- **CV.** A plane wave from the left edge; CV is measured between x = L/4 and 3L/4, averaging all
+  vertices in each column.
+- **APD90.** Time from the 0.5 upward crossing to the 0.1 downward crossing, at the strip centre.
+- **Auto-calibration.** D ← D·(CV_target/CV)², which follows from the near-square-root scaling
+  CV ∝ √D. It converges to < 0.5 % in 3 iterations. Calibration absorbs the remaining discretization
+  error of the lattice, so the target CV holds at h ≈ 1 mm.
+- **Restitution (S1–S2).**
+  - Six S1 beats at 600 ms are delivered. The state is snapshotted 5 ms after the last S1, then each S2
+    is replayed from that snapshot.
+  - DI is the S2 activation time minus the S1 repolarization time, at the strip centre.
+  - ERP is the longest S1–S2 coupling interval that fails to propagate (10 ms steps).
+- **Checked on the atrium.** The median local CV, computed from per-triangle activation gradients
+  (`cv.ts`, CV = 1/|∇T|), is within 15 % of the target. Lattice isotropy (x vs y) is within 10 %.
+
+### 2.5 Sinus rhythm
+
+The right atrium is not modelled, so left-atrial breakthroughs are driven directly at the sinus cycle
+length (default 800 ms). There are three sites, each a 4 mm-radius vertex patch:
+
+| Site | Location | Delay |
+|---|---|---|
+| Bachmann's bundle | anterosuperior septal roof | 0 ms |
+| Fossa-ovalis region | mid septum | +15 ms |
+| Coronary-sinus musculature | inferior septum near the annulus | +30 ms |
+
+This sequence follows the principal LA input routes described in endocardial and epicardial mapping
+studies (Markides et al. 2003; Lemery et al. 2007). The delays are representative values chosen here.
+
+Resulting activation, which is checked by tests:
+
+| Substrate | Total LA activation | Earliest site | Latest region |
+|---|---|---|---|
+| Healthy | ≈ 113–115 ms | BB patch | lateral wall / LAA / left inferior vein |
+| Persistent | ≈ 190 ms | — | — |
+
+### 2.6 Eikonal mode (`eikonal.ts`)
+
+This mode solves |∇T| = 1/F with fast marching on triangles (Kimmel & Sethian 1998).
+
+- **Triangle update.** Solve the quadratic for T_C from the linear interpolant, accepted only if the
+  characteristic enters through the triangle; otherwise use edge updates.
+- **Sources.** The two vertex rings around each source are initialized with straight-line times. This
+  removes most of the first-order source error: < 3 % on a flat sheet.
+- **Speed.** F = CV_target · √σ, zero at inexcitable nodes. Uncoupled interstitial edges are
+  approximated by slowing each node in proportion to its fraction of removed edges.
+- **Agreement with reaction–diffusion** in sinus rhythm (16.5k vertices):
+
+  | Substrate | Pearson r | Mean absolute difference |
+  |---|---|---|
+  | Healthy | 0.9998 | 2.1 ms |
+  | Persistent | 0.9989 | 6.7 ms |
+
+  Run time is 0.1–0.3 s.
+- **Voltage display.** For animation and later EGMs, Vm(t) is synthesized as
+  template(t − T_i mod CL), using a single-cell action-potential template from the active ionic
+  model. Eikonal mode cannot represent reentry, refractoriness interactions, or pacing; use
+  reaction–diffusion for those.
+
+### 2.7 Simulation clock
+
+Simulation time is independent of wall time. A scheduler tick spends up to 30 ms of wall time
+advancing the simulation in sub-chunks:
+
+- The sub-chunk size adapts so each costs 5–15 ms.
+- With a speed target, only the time owed is advanced (speed × elapsed wall time, capped at 50 ms).
+- Frames are posted at ≤ 30 Hz.
+- The displayed speed is measured over 0.5 s windows: simulated ms per wall ms.
+- Pause and single-step (+10 ms) are exact: whole time steps.
+
+Measured throughput on the 16.5k-vertex LA:
+
+| Environment | Speed |
+|---|---|
+| CPU backend in Node | ≈ 0.13× real time |
+| CPU in a browser worker in this development container | ≈ 0.03–0.06× |
+| WebGPU on SwiftShader (software emulation) | ≈ 0.03× |
+
+The WebGPU target is ≥ 0.25× on a real GPU. It must be checked with `selftest.html` on real
+hardware; the container has no GPU.
 
 ## 3. Catheters and signals
 *(planned, M3.)*
@@ -245,20 +456,42 @@ eikonal fast-marching mode.
 
 ## Known limitations
 
-These apply as of M1.
-
-- **Single surface.** The atrium is a single surface with no wall volume. Wall thickness is a per-vertex
-  attribute, not geometry. Transmural effects (lesion depth, fibrosis depth, epicardial structures) are
-  modeled phenomenologically, not resolved.
+### Anatomy (M1)
+- **Single surface.** The atrium is a single surface with no wall volume. Wall thickness is a
+  per-vertex attribute, not geometry. Transmural effects (lesion depth, fibrosis depth, epicardial
+  structures) are modeled phenomenologically, not resolved.
 - **Idealized anatomy.**
   - The LA body is an ellipsoid. Real atria have pectinate muscles in the LAA, the left lateral ridge,
     septal folds, and much more shape variation.
-  - PV variants (common ostia, right middle veins) are not generated. A smooth-min blend can merge
-    ipsilateral antra, but only coincidentally.
-- **Imported meshes are not resampled.** Very coarse or very fine imported meshes will need remeshing
-  before the M2 solver calibration holds. Projection-based remeshing onto an imported surface is planned.
+  - PV variants (common ostia, right middle veins) are not generated.
+- **Imported meshes are not resampled.** Very coarse or very fine imported meshes need remeshing
+  before the solver calibration holds.
 - **Geodesic error.** Edge-graph Dijkstra overestimates geodesic distance by up to about 9 %. This is
-  acceptable for labelling but not for conduction velocity estimates.
+  used for labelling only.
+
+### Electrophysiology (M2), compared with bidomain models and real atria
+- **Monodomain, not bidomain.**
+  - Assumes equal intra- and extracellular anisotropy ratios.
+  - Ignores extracellular current redistribution. This matters for defibrillation, virtual electrodes,
+    and strong field stimulation, which this simulator does not cover.
+  - Unipolar EGMs (M3) are computed in a separate post-processing step from the monodomain source.
+- **Isotropic conduction.** Real atria conduct about 2–3× faster along fibres. Bachmann's bundle,
+  the crista and the septopulmonary bundle are not represented as fast tracts. Fibre architecture is
+  only used for the interstitial fibrosis pattern.
+- **Phenomenological ionic models.**
+  - There are no ionic currents, concentrations, or drug targets.
+  - APD restitution comes from gating dynamics only.
+  - Remodeling is represented by time constants, not by channel expression.
+- **No right atrium or sinus node.** Sinus breakthroughs are prescribed. RA-dependent rhythms
+  (typical flutter) need the stretch-goal RA.
+- **Discrete structural fibrosis.** Fibrotic nodes are fully isolated, with no fibroblast–myocyte
+  coupling or partial conductance. Patch size and transmurality are statistical, not imaging-derived.
+- **Discretization.** Calibration absorbs CV error at h ≈ 1 mm, but wavefront-curvature effects and
+  conduction failure at sharp fibrotic boundaries are mesh-dependent, as in any discrete model.
+- **Eikonal mode** has no refractoriness, so it cannot show reentry, collision-dependent block, or
+  pacing.
+- **Performance.** The CPU fallback is slow, ≈ 0.03–0.13× real time depending on hardware. GPU
+  performance has not been measured on real hardware during development.
 
 ## References
 
@@ -273,3 +506,16 @@ These apply as of M1.
 9. Beinart R, Abbara S, Blum A, et al. Left atrial wall thickness variability measured by CT scans in patients undergoing pulmonary vein isolation. *J Cardiovasc Electrophysiol* 2011;22:1232–1236.
 10. Platonov PG, Ivanov V, Ho SY, Mitrofanova L. Left atrial posterior wall thickness in patients with and without atrial fibrillation: data from 298 consecutive autopsies. *J Cardiovasc Electrophysiol* 2008;19:689–692.
 11. Wittkampf FHM, van Oosterhout MF, Loh P, et al. Where to draw the mitral isthmus line in catheter ablation of atrial fibrillation: histological analysis. *Eur Heart J* 2005;26:689–695.
+12. Pinkall U, Polthier K. Computing discrete minimal surfaces and their conjugates. *Experimental Mathematics* 1993;2:15–36.
+13. Qu Z, Garfinkel A. An advanced algorithm for solving partial differential equation in cardiac conduction. *IEEE Trans Biomed Eng* 1999;46:1166–1168.
+14. Rush S, Larsen H. A practical algorithm for solving dynamic membrane equations. *IEEE Trans Biomed Eng* 1978;25:389–392.
+15. Mitchell CC, Schaeffer DG. A two-current model for the dynamics of cardiac membrane. *Bull Math Biol* 2003;65:767–793.
+16. Aliev RR, Panfilov AV. A simple two-variable model of cardiac excitation. *Chaos Solitons Fractals* 1996;7:293–301.
+17. Fenton F, Karma A. Vortex dynamics in three-dimensional continuous myocardium with fiber rotation: filament instability and fibrillation. *Chaos* 1998;8:20–47.
+18. Fenton FH, Cherry EM, Hastings HM, Evans SJ. Multiple mechanisms of spiral wave breakup in a model of cardiac electrical activity. *Chaos* 2002;12:852–892.
+19. Kimmel R, Sethian JA. Computing geodesic paths on manifolds. *Proc Natl Acad Sci USA* 1998;95:8431–8435.
+20. Dössel O, Krueger MW, Weber FM, Wilhelms M, Seemann G. Computational modeling of the human atrial anatomy and electrophysiology. *Med Biol Eng Comput* 2012;50:773–799.
+21. Wijffels MC, Kirchhof CJ, Dorland R, Allessie MA. Atrial fibrillation begets atrial fibrillation: a study in awake chronically instrumented goats. *Circulation* 1995;92:1954–1968.
+22. Rensma PL, Allessie MA, Lammers WJ, Bonke FI, Schalij MJ. Length of excitation wave and susceptibility to reentrant atrial arrhythmias in normal conscious dogs. *Circ Res* 1988;62:395–410.
+23. Markides V, Schilling RJ, Ho SY, Chow AW, Davies DW, Peters NS. Characterization of left atrial activation in the intact human heart. *Circulation* 2003;107:733–739.
+24. Lemery R, Birnie D, Tang ASL, Green M, Gollob M, Hendry M, Lau E. Normal atrial activation and voltage during sinus rhythm in the human heart: an endocardial and epicardial mapping study in patients with a history of atrial fibrillation. *J Cardiovasc Electrophysiol* 2007;18:402–408.

@@ -14,7 +14,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | Milestone | Status |
 |---|---|
 | **M1** — Mesh, rendering, camera views, region labels | ✅ done |
-| M2 — Monodomain / eikonal solver, calibration, sinus rhythm | planned |
+| **M2** — Monodomain / eikonal solver, calibration, sinus rhythm | ✅ done |
 | M3 — Catheters, EGM synthesis, EGM panel | planned |
 | M4 — Acquisition, annotation, LAT and voltage maps | planned |
 | M5 — Ablation and lesion tags | planned |
@@ -23,15 +23,19 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 
 ## Running
 
-You need Node ≥ 20 and a browser with WebGL 2. WebGPU will be used from M2, with a CPU fallback.
+You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU when the browser has it (recent Chrome/Edge; Safari/Firefox with WebGPU enabled) and falls back to a CPU Web Worker otherwise.
 
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 20 s; generates the full-resolution atrium once)
+npm test           # Vitest suite (≈ 1 min; mesh, solver, calibration, reentry, sinus rhythm)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
+
+**Solver self-test.** Open `/selftest.html` (dev server or build) to compare the CPU and WebGPU
+backends on identical problems and to measure the real-time factor on your hardware. Add
+`?backend=cpu` to the app URL to force the CPU worker.
 
 On first load the procedural atrium (~16.5 k vertices) is generated in a Web Worker, which takes about
 8–10 s. Later loads of the same seed and variability come from an IndexedDB cache and are instant.
@@ -48,6 +52,17 @@ On first load the procedural atrium (~16.5 k vertices) is generated in a Web Wor
 
 The sidebar has these panels:
 
+- **Simulation**
+  - **Eikonal (fast)** computes a sinus activation map instantly by fast marching. **Reaction–diffusion**
+    runs the full monodomain model, which you need for reentry, refractoriness and (from M6) pacing.
+  - **Tissue preset**: healthy, paroxysmal AF substrate, or persistent AF substrate (remodeled, with
+    fibrosis). Also pick the ionic model, the fibrosis amount and pattern, and the sinus cycle length.
+  - **Run / Pause / +10 ms / Reset**, and the speed (0.1× to 1×, or Max). The clock shows simulated
+    time and the measured speed as a multiple of real time.
+  - **Teacher view** is off by default. It reveals hidden ground truth: live voltage, the true
+    activation map of the last beat, and fibrotic nodes. Mapping in M4 never uses it.
+  - **Tissue lab** measures plane-wave CV, APD90, ERP, and S1–S2 restitution curves for the current
+    tissue.
 - **Anatomy**
   - Generate a procedural LA. The seed sets anatomical variation and wall-thickness noise. Variability
     0 gives the canonical shape; 1 gives typical variation.
@@ -95,8 +110,11 @@ src/
   core/            framework-free simulation core (runs in browser, workers and Node tests)
     math/ rng.ts noise.ts
     mesh/          implicit atrium, surface nets, remeshing, labels, thickness, topology, geodesics, I/O
+    ep/            FEM operators, ionic models, substrate, CPU and WebGPU solvers, eikonal, calibration
+  engine/          simulation engine hosted in a worker (clock, sinus pacing, backend selection)
   render/          three.js viewer, colormaps, standard views (framework-free)
-  workers/         mesh generation worker
+  workers/         mesh generation and simulation workers
+  selftest/        CPU-vs-WebGPU comparison page (selftest.html)
   ui/              Preact UI (panels, state, mesh service with IndexedDB cache)
 tests/             Vitest specs
 MODEL.md           model documentation

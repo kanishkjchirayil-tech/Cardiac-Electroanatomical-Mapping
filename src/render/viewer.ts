@@ -52,6 +52,8 @@ export class Viewer {
   private fpsT0 = performance.now();
   private showLabels = true;
   private wireVisible = false;
+  /** Render on demand: only when the camera, geometry, colours or overlays changed. */
+  private dirty = true;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -105,6 +107,7 @@ export class Viewer {
     this.controls.zoomSpeed = 1.4;
     this.controls.panSpeed = 0.8;
     this.controls.staticMoving = true;
+    this.controls.addEventListener('change', () => (this.dirty = true));
 
     this.gizmo = new OrientationGizmo();
 
@@ -133,7 +136,7 @@ export class Viewer {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
     g.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
     g.computeBoundingSphere();
     this.shell = new THREE.Mesh(g, this.material);
@@ -151,11 +154,13 @@ export class Viewer {
     const attr = this.shell.geometry.getAttribute('color') as THREE.BufferAttribute;
     (attr.array as Float32Array).set(colors);
     attr.needsUpdate = true;
+    this.dirty = true;
   }
 
   setWireframe(on: boolean): void {
     this.wireVisible = on;
     if (this.wire) this.wire.visible = on;
+    this.dirty = true;
   }
 
   setOpacity(opacity: number): void {
@@ -163,12 +168,14 @@ export class Viewer {
     this.material.opacity = opacity;
     this.material.depthWrite = opacity >= 0.999;
     this.material.needsUpdate = true;
+    this.dirty = true;
   }
 
   setLabelsVisible(on: boolean): void {
     this.showLabels = on;
     this.loopLines.visible = on;
     this.labelLayer.style.display = on ? '' : 'none';
+    this.dirty = true;
   }
 
   setView(name: ViewName, obliqueDeg = 30): void {
@@ -221,6 +228,7 @@ export class Viewer {
   }
 
   private applyClip(): void {
+    this.dirty = true;
     const planes = this.clip.enabled ? [this.clipPlane] : [];
     this.material.clippingPlanes = planes;
     this.wireMaterial.clippingPlanes = planes;
@@ -283,6 +291,12 @@ export class Viewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.controls.handleResize();
+    this.dirty = true;
+  }
+
+  /** Request a redraw on the next animation frame. */
+  requestRender(): void {
+    this.dirty = true;
   }
 
   private frame(): void {
@@ -291,6 +305,14 @@ export class Viewer {
       this.hoverDirty = false;
       this.pick();
     }
+    const now = performance.now();
+    if (now - this.fpsT0 >= 1000) {
+      this.onFps?.((this.frames * 1000) / (now - this.fpsT0));
+      this.frames = 0;
+      this.fpsT0 = now;
+    }
+    if (!this.dirty) return;
+    this.dirty = false;
     const r = this.renderer;
     const size = r.getSize(new THREE.Vector2());
     r.setViewport(0, 0, size.x, size.y);
@@ -299,14 +321,7 @@ export class Viewer {
     r.render(this.scene, this.camera);
     this.gizmo.render(r, this.camera, size);
     if (this.showLabels) this.updateLabels(size);
-
     this.frames++;
-    const now = performance.now();
-    if (now - this.fpsT0 >= 1000) {
-      this.onFps?.((this.frames * 1000) / (now - this.fpsT0));
-      this.frames = 0;
-      this.fpsT0 = now;
-    }
   }
 
   private updateLabels(size: THREE.Vector2): void {

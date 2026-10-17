@@ -64,3 +64,43 @@ export function cssGradient(map: (t: number) => RGB, stops = 12): string {
   }
   return `linear-gradient(to right, ${parts.join(', ')})`;
 }
+
+function ramp(stops: RGB[], t: number): RGB {
+  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+  const a = stops[i]!, b = stops[i + 1]!;
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+
+/** Conventional activation-map scale: red (earliest) → orange → yellow → green → blue → purple (latest). */
+export const LAT_STOPS: RGB[] = [
+  [0.86, 0.08, 0.08],
+  [0.98, 0.5, 0.05],
+  [0.98, 0.9, 0.1],
+  [0.15, 0.75, 0.25],
+  [0.1, 0.4, 0.95],
+  [0.55, 0.15, 0.8],
+];
+export const latColor = (t: number): RGB => ramp(LAT_STOPS, t);
+
+/** Transmembrane voltage, normalized v ∈ [0, 1]: resting slate blue → depolarized amber → peak cream. */
+export const VOLTAGE_STOPS: RGB[] = [
+  [0.16, 0.24, 0.36],
+  [0.42, 0.3, 0.42],
+  [0.92, 0.45, 0.18],
+  [1.0, 0.86, 0.45],
+];
+export const voltageColor = (v: number): RGB => ramp(VOLTAGE_STOPS, v);
+
+export const UNMAPPED: RGB = [0.5, 0.5, 0.52];
+export const FIBROTIC: RGB = [0.22, 0.22, 0.24];
+
+/** Fill a preallocated linear-RGB buffer from per-vertex values without allocating. */
+export function writeColors(out: Float32Array, n: number, f: (i: number) => RGB): void {
+  for (let i = 0; i < n; i++) {
+    const c = f(i);
+    out[3 * i] = srgbToLinear(c[0]);
+    out[3 * i + 1] = srgbToLinear(c[1]);
+    out[3 * i + 2] = srgbToLinear(c[2]);
+  }
+}
