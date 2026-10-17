@@ -1,0 +1,28 @@
+{
+  "name": "ostium-ep-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ostium — educational in-browser atrial electroanatomical mapping & ablation simulator. Not for clinical use.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@preact/signals": "2.11.2",
+    "preact": "10.29.8",
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "vite": "8.3.1",
+    "vitest": "5.0.3",
+    "typescript": "6.0.3",
+    "@types/three": "0.186.0",
+    "@webgpu/types": "0.1.74",
+    "@types/node": "22.19.0"
+  }
+}
