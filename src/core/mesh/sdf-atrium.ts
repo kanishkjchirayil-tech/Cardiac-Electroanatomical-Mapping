@@ -57,17 +57,17 @@ export const DEFAULT_ATRIUM: AtriumParams = {
   },
   pvBlend: 7,
   laa: {
-    attachDir: [0.8, -0.38, 0.42],
-    axis: [0.58, -0.66, 0.36],
-    tipAxis: [0.7, -0.3, 0.1],
+    attachDir: [0.8, -0.4, 0.42],
+    axis: [0.5, -0.78, 0.38],
+    tipAxis: [0.3, -0.62, -0.72],
     baseRadius: 8,
     midRadius: 6.5,
     tipRadius: 4,
-    proximalLength: 14,
-    distalLength: 12,
+    proximalLength: 11,
+    distalLength: 11,
     blend: 4,
   },
-  mitral: { normal: [0.35, -0.7, -0.62], cutFraction: 0.8 },
+  mitral: { normal: [0.35, -0.7, -0.62], cutFraction: 0.83 },
 };
 
 /** Randomize anatomy around the defaults; amount 0 returns an exact copy. */
@@ -273,13 +273,28 @@ export class AtriumShape {
     return q;
   }
 
-  /** Signed distance of p beyond cut c (positive = removed side), or -Infinity outside its cylinder. */
+  /**
+   * Signed distance of p beyond cut c (positive = removed side), or -Infinity when p is outside
+   * the cut's cylinder or belongs to a different primitive (so a cut never opens a neighbouring
+   * structure, e.g. the MV plane clipping a strongly jittered LAA).
+   */
   beyondCut(p: Vec3, c: number): number {
     const cut = this.cuts[c]!;
     const rel = sub(p, cut.point);
     const h = dot(rel, cut.normal);
     const radial = len(sub(rel, scale(cut.normal, h)));
-    return radial <= cut.radius ? h : -Infinity;
+    if (radial > cut.radius) return -Infinity;
+    return this.owner(p) === c ? h : -Infinity;
+  }
+
+  /** Primitive nearest to p: vein index 0–3, 4 for the body (= MV cut index), 5 for the LAA. */
+  owner(p: Vec3): number {
+    let best = this.veins.length, bestD = this.body(p);
+    for (let i = 0; i < this.veins.length; i++) {
+      const d = this.vein(i, p);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return this.laa(p) < bestD ? this.veins.length + 1 : best;
   }
 
   /**

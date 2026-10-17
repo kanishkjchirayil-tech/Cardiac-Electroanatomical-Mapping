@@ -126,4 +126,14 @@ describe('procedural left atrium', () => {
     expect(c.quality.boundaryLoopCount).toBe(5);
     expect(c.quality.nonManifoldEdges).toBe(0);
   });
+
+  it('stays a valid 5-opening manifold under strong anatomical variability', () => {
+    for (const seed of [5, 6, 7]) {
+      const r = generateAtrium({ seed, variability: 2, targetEdge: 1.5, gridSpacing: 1.2, remeshIterations: 4 });
+      expect(r.quality.boundaryLoopCount, `seed ${seed}`).toBe(5);
+      expect(r.quality.eulerCharacteristic, `seed ${seed}`).toBe(-3);
+      expect(r.quality.nonManifoldEdges).toBe(0);
+      expect(r.mesh.boundaryLoops.map((l) => l.label)).toEqual(['LSPV', 'LIPV', 'RSPV', 'RIPV', 'MV']);
+    }
+  });
 });
