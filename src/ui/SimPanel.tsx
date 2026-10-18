@@ -85,6 +85,7 @@ export function SimPanel() {
         </dl>
       )}
       {info?.gpuError && <p class="warnings small">WebGPU unavailable ({info.gpuError}); using the CPU worker.</p>}
+      <p class="small"><a class="link" href="./selftest.html" target="_blank" rel="noopener">Solver self-test and speed check ↗</a></p>
       <TeacherControls />
       <TissueLab />
     </section>

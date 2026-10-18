@@ -8,6 +8,8 @@ import { Simulation } from '../core/ep/simulation';
 import type { SolverBackend, BackendInit } from '../core/ep/backend';
 import { calibrateDiffusivity } from '../core/ep/calibrate';
 import { PRESETS, buildTissue, sinusSites } from '../core/ep/tissue';
+import { ElectrogramRig } from '../core/signals/rig';
+import type { LeadField } from '../core/signals/leadfield';
 
 /**
  * Compares the CPU and WebGPU backends on identical problems and measures throughput.
@@ -24,6 +26,7 @@ interface Problem {
   init: Omit<BackendInit, 'model'> & { ionic: IonicSpec };
   sites: Array<{ vertices: Uint32Array; delay: number }>;
   duration: number;
+  leadFields?: LeadField[];
 }
 
 async function run(kind: 'cpu' | 'webgpu', p: Problem, device?: GPUDevice) {
@@ -35,13 +38,15 @@ async function run(kind: 'cpu' | 'webgpu', p: Problem, device?: GPUDevice) {
     sim.schedule.trains.push({ site: k, start: 1 + s.delay, period: Infinity, count: 1 });
   });
   sim.markSitesChanged();
+  if (p.leadFields) be.setLeadFields(p.leadFields, Math.round(0.5 / init.dt));
   const t0 = performance.now();
   await sim.advance(p.duration);
   const wall = performance.now() - t0;
   const act = await be.readActivation();
   const v = await be.readV();
+  const egm = be.drainSamples();
   be.dispose();
-  return { act, v, wall, speed: p.duration / wall };
+  return { act, v, wall, speed: p.duration / wall, egm };
 }
 
 function compare(a: Float32Array, b: Float32Array): { maxAbs: number; meanAbs: number; n: number; mismatch: number } {
@@ -109,12 +114,21 @@ async function main() {
     init: { geom: tissue.geom, ionic: preset.ionic, edgeD: tissue.substrate.edgeDiffusivity(cal.D), apdScale: tissue.substrate.apdScale, excitable: tissue.substrate.excitable(), siteOf: new Int32Array(n).fill(-1), dt: dtLa },
     sites: sinusSites(mesh),
     duration: 250,
+    leadFields: new ElectrogramRig(mesh, { thickness: mesh.wallThickness, fibrosisDepth: tissue.substrate.fibrosisDepth, excitable: tissue.substrate.excitable() }).rows(),
   };
   const c = await run('cpu', la);
   const g = await run('webgpu', la, device);
   const lat = compare(c.act.last, g.act.last);
   result.la = { vertices: n, latMaxAbsMs: lat.maxAbs, latMeanAbsMs: lat.meanAbs, mismatch: lat.mismatch, cpuSpeed: c.speed, gpuSpeed: g.speed };
   print(`LA sinus (${n} vertices): max |ΔLAT| = ${lat.maxAbs.toFixed(4)} ms, mean ${lat.meanAbs.toFixed(5)} ms, mismatched = ${lat.mismatch}`);
+  let egmMax = 0, egmPeak = 0;
+  for (let i = 0; i < c.egm.data.length; i++) {
+    egmMax = Math.max(egmMax, Math.abs(c.egm.data[i]! - (g.egm.data[i] ?? NaN)));
+    egmPeak = Math.max(egmPeak, Math.abs(c.egm.data[i]!));
+  }
+  const sameCount = c.egm.times.length === g.egm.times.length;
+  result.egm = { samples: c.egm.times.length, rows: c.egm.rows, maxAbsDiffMv: egmMax, peakMv: egmPeak, sameCount };
+  print(`EGM sampling (${c.egm.rows} electrodes × ${c.egm.times.length} samples): max |ΔCPU−GPU| = ${egmMax.toExponential(2)} mV (peak ${egmPeak.toFixed(2)} mV), sample counts ${sameCount ? 'match' : 'DIFFER'}`);
   print(`Speed (sim time / wall time): CPU (main thread) ${c.speed.toFixed(3)}×, WebGPU ${g.speed.toFixed(3)}×`);
 
   // Sustained throughput on the GPU (2 s of simulated time).

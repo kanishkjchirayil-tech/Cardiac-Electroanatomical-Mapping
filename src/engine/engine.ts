@@ -8,7 +8,12 @@ import type { SolverBackend } from '../core/ep/backend';
 import { PRESETS, buildTissue, sinusSites, type SinusSite, type TissueBuild } from '../core/ep/tissue';
 import { fastMarching, type ApTemplate } from '../core/ep/eikonal';
 import { makeApTemplate } from '../core/ep/ap-template';
-import { DEFAULT_SIM_CONFIG, type FromWorker, type SimConfig, type SimInfo } from './protocol';
+import { DEFAULT_SIM_CONFIG, type EgmChunk, type FromWorker, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from './protocol';
+import { ElectrogramRig, EGM_FS, MOTION_UPDATE_MS } from '../core/signals/rig';
+import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
+import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
+import { Region } from '../core/mesh/regions';
+import type { EgmSamples } from '../core/ep/backend';
 
 /**
  * Simulation engine hosted in a worker. Owns the tissue, the solver backend (WebGPU with CPU
@@ -38,6 +43,17 @@ export class SimEngine {
   private lastFrame = 0;
   private generation = 0;
   private busy: Promise<void> = Promise.resolve();
+  // Recording rig and electrogram streaming.
+  private rig: ElectrogramRig | null = null;
+  private rovingVertex = -1;
+  private rovingConfig: RovingConfig = { ...DEFAULT_ROVING };
+  private signals: SignalSettings = DEFAULT_SIGNALS;
+  private motionEnabled = true;
+  private egmChunks: Array<{ t0: number; n: number; data: Float32Array }> = [];
+  private nextMotionT = 0;
+  /** Eikonal mode: one sinus cycle of the static (ECG + CS) electrode potentials, 0.5 ms steps. */
+  private eikTable: { data: Float32Array; len: number; rows: number[] } | null = null;
+  private eikNextSample = 0;
 
   constructor(private readonly post: (msg: FromWorker, transfer?: Transferable[]) => void) {}
 
@@ -57,7 +73,10 @@ export class SimEngine {
     const prev = this.config;
     this.config = { ...prev, ...patch };
     const onlySinus = Object.keys(patch).every((k) => k === 'sinusCl');
-    if (onlySinus) return this.enqueue(async () => this.applySinus());
+    if (onlySinus) return this.enqueue(async () => {
+      this.applySinus();
+      if (!this.sim) this.buildEikonalTable();
+    });
     return this.enqueue(() => this.rebuild());
   }
 
@@ -112,6 +131,7 @@ export class SimEngine {
       this.applySinus();
     }
     if (gen !== this.generation) return;
+    this.buildRig();
     const stats = sub.stats();
     const info: SimInfo = {
       backend: c.mode === 'eikonal' ? 'eikonal' : this.backend!.kind,
@@ -128,8 +148,149 @@ export class SimEngine {
       buildMs: performance.now() - t0,
       eikonalMs,
     };
-    this.post({ type: 'ready', info, config: { ...c } });
+    this.post({ type: 'ready', info, config: { ...c }, rig: this.rigInfo() });
     await this.postFrame(true);
+  }
+
+  /** Electrodes, lead fields and recording system for the current tissue. */
+  private buildRig(): void {
+    const mesh = this.mesh!, sub = this.tissue!.substrate;
+    this.rig = new ElectrogramRig(mesh, { thickness: mesh.wallThickness, fibrosisDepth: sub.fibrosisDepth, excitable: sub.excitable() }, this.config.seed, this.signals);
+    this.rig.motionEnabled = this.motionEnabled;
+    if (this.rovingVertex < 0 || this.rovingVertex >= mesh.region.length) this.rovingVertex = defaultRovingVertex(mesh);
+    this.rig.placeRoving(this.rovingVertex, this.rovingConfig);
+    this.egmChunks = [];
+    this.nextMotionT = this.now();
+    this.eikNextSample = Math.ceil(this.now() / (1000 / EGM_FS)) * (1000 / EGM_FS);
+    this.uploadLeadFields();
+    if (!this.sim) this.buildEikonalTable();
+  }
+
+  private sampleEvery(): number {
+    return Math.max(1, Math.round(1000 / EGM_FS / this.dt()));
+  }
+
+  private uploadLeadFields(): void {
+    if (this.sim && this.rig) this.sim.backend.setLeadFields(this.rig.rows(), this.sampleEvery());
+  }
+
+  private rigInfo(): RigInfo {
+    const r = this.rig!;
+    const site = this.sites.find((x) => x.name === 'Fossa ovalis') ?? this.sites[0];
+    const P = this.mesh!.positions, N = this.mesh!.normals;
+    const v = site ? site.vertices[0]! : 0;
+    return {
+      channels: r.channels,
+      fs: EGM_FS,
+      csPath: r.cs.path.flat(),
+      csElectrodes: r.cs.electrodes.flat(),
+      // Entry point 3 mm inside the septal wall at the fossa.
+      transseptal: [0, 1, 2].map((k) => P[3 * v + k]! - 3 * N[3 * v + k]!),
+    };
+  }
+
+  placeRoving(vertex: number): Promise<void> {
+    return this.enqueue(async () => {
+      this.rovingVertex = vertex;
+      if (!this.rig) return;
+      this.rig.placeRoving(vertex, this.rovingConfig);
+      this.uploadLeadFields();
+      await this.postFrame(true);
+    });
+  }
+
+  setRovingConfig(config: Partial<RovingConfig>): Promise<void> {
+    return this.enqueue(async () => {
+      this.rovingConfig = { ...this.rovingConfig, ...config };
+      this.rig?.setRovingConfig(this.rovingConfig);
+      this.uploadLeadFields();
+      await this.postFrame(true);
+    });
+  }
+
+  setSignals(settings: SignalSettings): Promise<void> {
+    return this.enqueue(async () => {
+      this.signals = settings;
+      this.rig?.configureSignals(settings);
+    });
+  }
+
+  setMotion(enabled: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      this.motionEnabled = enabled;
+      if (this.rig) this.rig.motionEnabled = enabled;
+    });
+  }
+
+  /** Steady-state eikonal Vm of vertex i at time t (normalized). */
+  private eikVm(i: number, t: number): number {
+    const T = this.eikonalT!, tpl = this.template!;
+    const ti = T[i]!;
+    if (!Number.isFinite(ti)) return 0;
+    const cl = this.config.sinusCl;
+    if (cl <= 0) return tpl.at(t - ti);
+    const phase = ((t % cl) + cl) % cl;
+    return Math.max(tpl.at(phase - ti), tpl.at(phase + cl - ti));
+  }
+
+  /** Precompute one cycle of the non-moving electrodes (ECG, CS) in eikonal mode. */
+  private buildEikonalTable(): void {
+    if (!this.rig || !this.eikonalT) return;
+    const step = 1000 / EGM_FS;
+    const cl = this.config.sinusCl > 0 ? this.config.sinusCl : 600;
+    const len = Math.round(cl / step);
+    const rows = this.rig.electrodes.map((e, i) => (e.group === 'map' ? -1 : i)).filter((i) => i >= 0);
+    const fields = this.rig.rows();
+    const n = this.eikonalT.length;
+    const vm = new Float32Array(n);
+    const data = new Float32Array(len * rows.length);
+    for (let k = 0; k < len; k++) {
+      const t = this.config.sinusCl > 0 ? k * step + this.config.sinusCl : k * step;
+      for (let i = 0; i < n; i++) vm[i] = this.eikVm(i, t);
+      rows.forEach((r, j) => {
+        const f = fields[r]!;
+        let acc = 0;
+        for (let q = 0; q < f.idx.length; q++) acc += f.w[q]! * vm[f.idx[q]!]!;
+        data[k * rows.length + j] = acc;
+      });
+    }
+    this.eikTable = { data, len, rows };
+  }
+
+  /** Eikonal-mode samples in (from, to]: static rows from the periodic table, roving rows on the fly. */
+  private eikonalSamples(from: number, to: number): EgmSamples | null {
+    const rig = this.rig, tab = this.eikTable;
+    if (!rig || !tab || !this.eikonalT) return null;
+    const step = 1000 / EGM_FS;
+    const times: number[] = [];
+    for (let t = this.eikNextSample; t <= to + 1e-9; t += step) if (t > from - 1e-9) times.push(t);
+    if (!times.length) return null;
+    this.eikNextSample = times[times.length - 1]! + step;
+    const nE = rig.electrodes.length;
+    const data = new Float32Array(times.length * nE);
+    const fields = rig.rows();
+    const cl = this.config.sinusCl;
+    times.forEach((t, s) => {
+      const k = cl > 0 ? Math.round((((t % cl) + cl) % cl) / step) % tab.len : Math.min(tab.len - 1, Math.round(t / step));
+      tab.rows.forEach((r, j) => (data[s * nE + r] = tab.data[k * tab.rows.length + j]!));
+      rig.electrodes.forEach((e, r) => {
+        if (e.group !== 'map') return;
+        const f = fields[r]!;
+        let acc = 0;
+        for (let q = 0; q < f.idx.length; q++) acc += f.w[q]! * this.eikVm(f.idx[q]!, t);
+        data[s * nE + r] = acc;
+      });
+    });
+    return { times: Float64Array.from(times), data, rows: nE };
+  }
+
+  private collect(samples: EgmSamples | null): void {
+    if (!samples || !this.rig || !samples.times.length) return;
+    const p = this.rig.process(samples);
+    if (p.n) this.egmChunks.push(p);
+    // Bound memory if nobody drains (e.g. frames throttled): keep ≤ 10 s.
+    let total = this.egmChunks.reduce((a, c) => a + c.n, 0);
+    while (total > 10 * EGM_FS && this.egmChunks.length > 1) total -= this.egmChunks.shift()!.n;
   }
 
   /**
@@ -218,7 +379,7 @@ export class SimEngine {
       // Eikonal playback costs nothing, so "max" means real time there.
       const speed = this.speed > 0 ? this.speed : eik ? 1 : 0;
       if (eik) {
-        this.eikT += speed * wall;
+        await this.advance(speed * wall);
         this.win.sim += speed * wall;
       } else {
         if (speed > 0) this.debt = Math.min(this.debt + speed * wall, 50);
@@ -252,9 +413,28 @@ export class SimEngine {
     return this.sim?.dt ?? 0.5;
   }
 
+  /**
+   * Advance the clock by `ms`, in pieces aligned to the catheter-motion update interval so the
+   * roving lead fields follow the moving tip, and collect electrogram samples.
+   */
   private async advance(ms: number): Promise<void> {
-    if (this.sim) await this.sim.advance(ms);
-    else this.eikT += ms;
+    const end = this.now() + ms;
+    const half = this.sim ? this.dt() / 2 : 1e-9;
+    while (end - this.now() > half) {
+      const now = this.now();
+      if (this.rig && now >= this.nextMotionT - 1e-9) {
+        if (this.rig.updateMotion(now, this.config.sinusCl)) this.uploadLeadFields();
+        this.nextMotionT = (Math.floor(now / MOTION_UPDATE_MS + 1e-9) + 1) * MOTION_UPDATE_MS;
+      }
+      const piece = Math.min(end, this.rig ? this.nextMotionT : end) - now;
+      if (this.sim) {
+        await this.sim.advance(Math.max(piece, this.dt()));
+        this.collect(this.sim.backend.drainSamples());
+      } else {
+        this.collect(this.eikonalSamples(now, now + piece));
+        this.eikT = now + piece;
+      }
+    }
   }
 
   private now(): number {
@@ -268,7 +448,41 @@ export class SimEngine {
     let v: Float32Array;
     if (this.sim) v = await this.sim.backend.readV();
     else v = this.eikonalVm();
-    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running }, [v.buffer]);
+    const egm = this.drainEgm();
+    const roving = this.rovingFrame();
+    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
+  }
+
+  private drainEgm(): EgmChunk | null {
+    if (!this.egmChunks.length || !this.rig) return null;
+    const nCh = this.rig.channels.length;
+    const n = this.egmChunks.reduce((a, c) => a + c.n, 0);
+    const data = new Float32Array(n * nCh);
+    let off = 0;
+    for (const c of this.egmChunks) {
+      data.set(c.data, off);
+      off += c.data.length;
+    }
+    const t0 = this.egmChunks[0]!.t0;
+    this.egmChunks = [];
+    return { t0, n, nCh, data };
+  }
+
+  private rovingFrame(): RovingFrame | null {
+    const r = this.rig?.rovingState();
+    if (!r) return null;
+    return {
+      vertex: r.vertex,
+      config: r.config,
+      electrodes: r.pose.electrodes.flat(),
+      tipEnd: [...r.pose.tipEnd],
+      axis: [...r.pose.axis],
+      contact: [...r.pose.contact],
+      normal: [...r.pose.normal],
+      force: r.pose.force,
+      gap: r.pose.gap,
+      stability: r.stability,
+    };
   }
 
   /** Vm (normalized) in eikonal mode: template(t − T_i) for the current and previous sinus beat. */
@@ -323,4 +537,24 @@ export class SimEngine {
       this.post({ type: 'lab', preset: this.config.preset, ionic: this.config.ionic, D0: cal.D, cv: cal.cv, apd90: cal.apd90, restitution });
     });
   }
+}
+
+/** Default roving position: the lateral-wall vertex closest to that region's centroid. */
+function defaultRovingVertex(mesh: SurfaceMesh): number {
+  const P = mesh.positions;
+  const c = [0, 0, 0];
+  let n = 0;
+  mesh.region.forEach((r, i) => {
+    if (r !== Region.Lateral) return;
+    for (let k = 0; k < 3; k++) c[k]! += P[3 * i + k]!;
+    n++;
+  });
+  if (!n) return 0;
+  let best = 0, bd = Infinity;
+  mesh.region.forEach((r, i) => {
+    if (r !== Region.Lateral) return;
+    const d = (P[3 * i]! - c[0]! / n) ** 2 + (P[3 * i + 1]! - c[1]! / n) ** 2 + (P[3 * i + 2]! - c[2]! / n) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  });
+  return best;
 }

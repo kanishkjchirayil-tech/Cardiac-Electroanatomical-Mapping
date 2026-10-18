@@ -59,3 +59,51 @@ describe('simulation engine (worker host)', () => {
     expect(h.last('ready')!.info.fibroticFraction).toBeGreaterThan(0.1);
   });
 });
+
+describe('electrogram streaming', () => {
+  const { mesh } = defaultAtrium();
+
+  it('eikonal mode streams contiguous 2 kHz samples for all channels and the roving pose', async () => {
+    const h = harness();
+    await h.engine.init(mesh, { ...DEFAULT_SIM_CONFIG, mode: 'eikonal' });
+    const ready = h.last('ready')!;
+    const nCh = ready.rig.channels.length;
+    expect(ready.rig.channels.map((c) => c.name)).toEqual(['I', 'II', 'V1', 'CS 9-10', 'CS 7-8', 'CS 5-6', 'CS 3-4', 'CS 1-2', 'MAP 1-2', 'MAP 3-4', 'MAP 1 uni', 'MAP 2 uni']);
+    h.msgs.length = 0;
+    await h.engine.step(500);
+    await h.engine.step(500);
+    const chunks = h.msgs.filter((m): m is Extract<FromWorker, { type: 'frame' }> => m.type === 'frame' && !!m.egm).map((m) => m.egm!);
+    const total = chunks.reduce((a, c) => a + c.n, 0);
+    expect(Math.abs(total - 2000)).toBeLessThanOrEqual(2);
+    for (let i = 1; i < chunks.length; i++) expect(chunks[i]!.t0).toBeCloseTo(chunks[i - 1]!.t0 + chunks[i - 1]!.n * 0.5, 6);
+    expect(chunks[0]!.nCh).toBe(nCh);
+    const f = h.last('frame')!;
+    expect(f.roving).not.toBeNull();
+    expect(f.roving!.electrodes.length).toBe(12);
+  });
+
+  it('moving the roving catheter changes the local activation time it records', async () => {
+    const h = harness();
+    await h.engine.init(mesh, { ...DEFAULT_SIM_CONFIG, mode: 'eikonal', sinusCl: 800 });
+    await h.engine.setMotion(false);
+    const ch = h.last('ready')!.rig.channels.findIndex((c) => c.name === 'MAP 1-2');
+    const peakTime = async (vertex: number) => {
+      await h.engine.placeRoving(vertex);
+      h.msgs.length = 0;
+      await h.engine.step(800);
+      const chunks = h.msgs.filter((m): m is Extract<FromWorker, { type: 'frame' }> => m.type === 'frame' && !!m.egm).map((m) => m.egm!);
+      let best = 0, bt = 0;
+      for (const c of chunks) for (let s = 0; s < c.n; s++) {
+        const v = Math.abs(c.data[s * c.nCh + ch]!);
+        if (v > best) { best = v; bt = (c.t0 + s * 0.5) % 800; }
+      }
+      return bt;
+    };
+    const { sinusSites } = await import('../src/core/ep/tissue');
+    const early = await peakTime(sinusSites(mesh)[0]!.vertices[0]!);
+    let lateral = 0;
+    for (let i = 0; i < mesh.region.length; i++) if (mesh.positions[3 * i]! > mesh.positions[3 * lateral]! && mesh.region[i] !== 15) lateral = i;
+    const late = await peakTime(lateral);
+    expect(late - early).toBeGreaterThan(50);
+  });
+});

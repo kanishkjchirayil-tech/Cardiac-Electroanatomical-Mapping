@@ -1,6 +1,7 @@
 import { buildDiffusion, stableDiffusionDt, type TissueGeometry } from './fem';
 import type { IonicModel } from './ionic';
-import { ACT_THRESHOLD, REPOL_THRESHOLD, type ActivationRecord, type BackendInit, type SolverBackend } from './backend';
+import { ACT_THRESHOLD, REPOL_THRESHOLD, packLeadFields, SampleBuffer, type ActivationRecord, type BackendInit, type EgmSamples, type SolverBackend } from './backend';
+import type { LeadField } from '../signals/leadfield';
 import { MAX_STIM_SITES } from './stimulus';
 
 /**
@@ -26,7 +27,7 @@ struct StepU {
   t0: f32,
   dt: f32,
   dts: f32,
-  pad: f32,
+  slot: u32,
   amps0: vec4<f32>,
   amps1: vec4<f32>,
 };
@@ -94,6 +95,45 @@ fn finalStep(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 }
 
+/** Electrogram sampling kernel: one workgroup per lead-field row, tree reduction in shared memory. */
+function sampleShader(rows: number): string {
+  return /* wgsl */ `
+const R: u32 = ${rows}u;
+struct StepU {
+  t0: f32,
+  dt: f32,
+  dts: f32,
+  slot: u32,
+  amps0: vec4<f32>,
+  amps1: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> U: StepU;
+@group(0) @binding(1) var<storage, read> v: array<f32>;
+@group(0) @binding(2) var<storage, read> lfi: array<u32>; // rowPtr[R+1] ++ idx[]
+@group(0) @binding(3) var<storage, read> lfw: array<f32>;
+@group(0) @binding(4) var<storage, read_write> outv: array<f32>;
+var<workgroup> partial: array<f32, ${WG}>;
+
+@compute @workgroup_size(${WG})
+fn sample(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let r = wg.x;
+  let s = lfi[r];
+  let e = lfi[r + 1u];
+  var acc = 0.0;
+  for (var k = s + lid.x; k < e; k = k + ${WG}u) {
+    acc = acc + lfw[k] * v[lfi[R + 1u + k]];
+  }
+  partial[lid.x] = acc;
+  workgroupBarrier();
+  for (var o = ${WG / 2}u; o > 0u; o = o >> 1u) {
+    if (lid.x < o) { partial[lid.x] = partial[lid.x] + partial[lid.x + o]; }
+    workgroupBarrier();
+  }
+  if (lid.x == 0u) { outv[U.slot * R + r] = partial[0]; }
+}
+`;
+}
+
 export class WebGpuBackend implements SolverBackend {
   readonly kind = 'webgpu' as const;
   readonly nV: number;
@@ -112,6 +152,15 @@ export class WebGpuBackend implements SolverBackend {
   private apd: Float32Array;
   private exc: Uint8Array;
   private siteOf: Int32Array;
+  // Electrogram sampling state.
+  private lfRows = 0;
+  private sampleEvery = 0;
+  private stepCount = 0;
+  private samples = new SampleBuffer(0);
+  private lfBufs: { lfi: GPUBuffer; lfw: GPUBuffer; out: GPUBuffer } | null = null;
+  private sampleLayout: GPUBindGroupLayout | null = null;
+  private pSample: GPUComputePipeline | null = null;
+  private sampleBind = new Map<string, GPUBindGroup>();
 
   static async create(init: BackendInit, device?: GPUDevice): Promise<WebGpuBackend> {
     let dev = device;
@@ -256,8 +305,16 @@ export class WebGpuBackend implements SolverBackend {
         f[o] = t0 + (done + s) * this.dt;
         f[o + 1] = this.dt;
         f[o + 2] = this.dt / nSub;
-        f[o + 3] = 0;
         for (let k = 0; k < MAX_STIM_SITES; k++) f[o + 4 + k] = amps[(done + s) * MAX_STIM_SITES + k]!;
+      }
+      // Sampling slots: steps whose (global) index completes a sample period.
+      const u = new Uint32Array(this.uniData);
+      const sampleTimes: number[] = [];
+      for (let s = 0; s < batch; s++) {
+        const k = this.stepCount + s + 1;
+        const sampled = this.sampleEvery > 0 && k % this.sampleEvery === 0;
+        u[(s * STEP_STRIDE) / 4 + 3] = sampled ? sampleTimes.length : 0xffffffff;
+        if (sampled) sampleTimes.push(t0 + (done + s + 1) * this.dt);
       }
       this.device.queue.writeBuffer(this.bufs.uni, 0, this.uniData, 0, batch * STEP_STRIDE);
       const enc = this.device.createCommandEncoder();
@@ -280,12 +337,85 @@ export class WebGpuBackend implements SolverBackend {
         pass.setBindGroup(0, this.bind(this.cur, nSub > 1 ? 'vS' : this.cur), off);
         pass.dispatchWorkgroups(groups);
         this.cur = this.cur === 'vA' ? 'vB' : 'vA';
+        if (u[(s * STEP_STRIDE) / 4 + 3] !== 0xffffffff && this.pSample) {
+          pass.setPipeline(this.pSample);
+          pass.setBindGroup(0, this.sampleBindGroup(this.cur), off);
+          pass.dispatchWorkgroups(this.lfRows);
+        }
       }
       pass?.end();
       this.device.queue.submit([enc.finish()]);
+      this.stepCount += batch;
       done += batch;
+      if (sampleTimes.length && this.lfBufs) {
+        const data = new Float32Array(await this.read(this.lfBufs.out, 4 * sampleTimes.length * this.lfRows));
+        this.samples.pushBlock(sampleTimes, data);
+      }
     }
     await this.device.queue.onSubmittedWorkDone();
+  }
+
+  setLeadFields(rows: LeadField[], sampleEvery: number): void {
+    const packed = packLeadFields(rows);
+    const R = rows.length;
+    this.sampleEvery = R ? sampleEvery : 0;
+    if (this.samples.rows !== R) this.samples = new SampleBuffer(R);
+    if (!R) return;
+    const d = this.device;
+    const S = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, CS = GPUBufferUsage.COPY_SRC;
+    const lfi = new Uint32Array(R + 1 + packed.idx.length);
+    lfi.set(packed.rowPtr, 0);
+    lfi.set(packed.idx, R + 1);
+    const maxSlots = Math.ceil(MAX_BATCH / Math.max(1, sampleEvery)) + 1;
+    const need = { lfi: lfi.byteLength, lfw: packed.w.byteLength, out: 4 * maxSlots * R };
+    const b = this.lfBufs;
+    if (!b || b.lfi.size < need.lfi || b.lfw.size < need.lfw || b.out.size < need.out || R !== this.lfRows) {
+      b?.lfi.destroy(); b?.lfw.destroy(); b?.out.destroy();
+      const mk = (size: number, usage: number) => d.createBuffer({ size: Math.max(16, Math.ceil((size * 1.5) / 4) * 4), usage });
+      this.lfBufs = { lfi: mk(need.lfi, S | CD), lfw: mk(need.lfw, S | CD), out: mk(need.out, S | CS) };
+      this.sampleBind.clear();
+    }
+    if (R !== this.lfRows || !this.pSample) {
+      const ro = (binding: number): GPUBindGroupLayoutEntry => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } });
+      this.sampleLayout = d.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 48 } },
+          ro(1), ro(2), ro(3),
+          { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        ],
+      });
+      this.pSample = d.createComputePipeline({
+        layout: d.createPipelineLayout({ bindGroupLayouts: [this.sampleLayout] }),
+        compute: { module: d.createShaderModule({ code: sampleShader(R) }), entryPoint: 'sample' },
+      });
+      this.sampleBind.clear();
+    }
+    this.lfRows = R;
+    d.queue.writeBuffer(this.lfBufs!.lfi, 0, lfi);
+    d.queue.writeBuffer(this.lfBufs!.lfw, 0, packed.w);
+  }
+
+  private sampleBindGroup(v: 'vA' | 'vB'): GPUBindGroup {
+    let bg = this.sampleBind.get(v);
+    if (!bg) {
+      const L = this.lfBufs!;
+      bg = this.device.createBindGroup({
+        layout: this.sampleLayout!,
+        entries: [
+          { binding: 0, resource: { buffer: this.bufs.uni, size: 48 } },
+          { binding: 1, resource: { buffer: this.bufs[v] } },
+          { binding: 2, resource: { buffer: L.lfi } },
+          { binding: 3, resource: { buffer: L.lfw } },
+          { binding: 4, resource: { buffer: L.out } },
+        ],
+      });
+      this.sampleBind.set(v, bg);
+    }
+    return bg;
+  }
+
+  drainSamples(): EgmSamples {
+    return this.samples.drain();
   }
 
   private async read(src: GPUBuffer, bytes: number): Promise<ArrayBuffer> {
@@ -347,5 +477,6 @@ export class WebGpuBackend implements SolverBackend {
 
   dispose(): void {
     for (const b of Object.values(this.bufs)) b.destroy();
+    if (this.lfBufs) for (const b of Object.values(this.lfBufs)) b.destroy();
   }
 }

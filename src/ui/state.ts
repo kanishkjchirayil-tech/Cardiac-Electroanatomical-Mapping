@@ -2,7 +2,9 @@ import { signal } from '@preact/signals';
 import type { SurfaceMesh } from '../core/mesh/types';
 import type { MeshQuality } from '../core/mesh/quality';
 import type { ClipState, HoverInfo } from '../render/viewer';
-import { DEFAULT_SIM_CONFIG, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_SIM_CONFIG, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
+import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
 import type { RestitutionResult } from '../core/ep/calibrate';
 
 export type Overlay = 'shell' | 'regions' | 'thickness';
@@ -47,3 +49,12 @@ export const vmFrameId = signal(0);
 export const gtActivation = signal<{ last: Float32Array; beatStart: number; fibrotic: Uint8Array; t: number } | null>(null);
 export const labResult = signal<{ D0: number; cv: number; apd90: number; restitution: RestitutionResult; label: string } | null>(null);
 export const labRunning = signal(false);
+
+// ---- Catheters and signals ----
+export const rigInfo = signal<RigInfo | null>(null);
+export const roving = signal<RovingFrame | null>(null);
+export const rovingConfig = signal<RovingConfig>({ ...DEFAULT_ROVING });
+export const signalSettings = signal<SignalSettings>(DEFAULT_SIGNALS);
+export const motionEnabled = signal(true);
+/** Bumped when new EGM samples arrive. */
+export const egmVersion = signal(0);

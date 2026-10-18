@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import type { SurfaceMesh } from '../core/mesh/types';
 import { standardViews, type ViewName } from './views';
+import { CatheterView } from './catheters';
+import type { RovingFrame } from '../engine/protocol';
 
 export interface HoverInfo {
   vertex: number;
@@ -29,6 +31,12 @@ export class Viewer {
   readonly controls: TrackballControls;
   onHover: ((h: HoverInfo | null) => void) | null = null;
   onFps: ((fps: number) => void) | null = null;
+  /** Click (no drag) on the shell. */
+  onSelect: ((h: HoverInfo) => void) | null = null;
+  /** Shift-drag across the shell (continuous). */
+  onDrag: ((h: HoverInfo) => void) | null = null;
+  readonly catheters = new CatheterView();
+  private readonly ghostScene = new THREE.Scene();
 
   private readonly container: HTMLElement;
   private readonly labelLayer: HTMLDivElement;
@@ -101,6 +109,8 @@ export class Viewer {
       clippingPlanes: [],
     });
     this.scene.add(this.loopLines);
+    this.scene.add(this.catheters.group);
+    this.ghostScene.add(this.catheters.ghost);
 
     this.controls = new TrackballControls(this.camera, this.renderer.domElement);
     this.controls.rotateSpeed = 3.0;
@@ -120,6 +130,37 @@ export class Viewer {
     el.addEventListener('pointerleave', () => {
       this.pointer = null;
       this.onHover?.(null);
+    });
+    // Click places the catheter; shift-drag drags it across the wall (trackball disabled meanwhile).
+    let down: { x: number; y: number; t: number; shift: boolean } | null = null;
+    const ndc = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    };
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      down = { x: e.clientX, y: e.clientY, t: performance.now(), shift: e.shiftKey };
+      if (e.shiftKey) {
+        this.controls.enabled = false;
+        const h = this.hitAt(ndc(e));
+        if (h) this.onDrag?.(h);
+      }
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (down?.shift && e.buttons & 1) {
+        const h = this.hitAt(ndc(e));
+        if (h) this.onDrag?.(h);
+      }
+    });
+    el.addEventListener('pointerup', (e) => {
+      if (!down) return;
+      const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+      if (down.shift) this.controls.enabled = true;
+      else if (moved < 5 && performance.now() - down.t < 400) {
+        const h = this.hitAt(ndc(e));
+        if (h) this.onSelect?.(h);
+      }
+      down = null;
     });
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -319,6 +360,7 @@ export class Viewer {
     r.setScissorTest(false);
     r.clear();
     r.render(this.scene, this.camera);
+    r.render(this.ghostScene, this.camera);
     this.gizmo.render(r, this.camera, size);
     if (this.showLabels) this.updateLabels(size);
     this.frames++;
@@ -338,14 +380,17 @@ export class Viewer {
   }
 
   private pick(): void {
-    if (!this.shell || !this.pointer || !this.onHover) return;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    if (!this.pointer || !this.onHover) return;
+    this.onHover(this.hitAt(this.pointer));
+  }
+
+  /** Nearest shell vertex under a point in normalized device coordinates (respects the clip plane). */
+  hitAt(p: THREE.Vector2): HoverInfo | null {
+    if (!this.shell) return null;
+    this.raycaster.setFromCamera(p, this.camera);
     const hits = this.raycaster.intersectObject(this.shell, false);
     const hit = hits.find((h) => !this.clip.enabled || this.clipPlane.distanceToPoint(h.point) >= 0);
-    if (!hit || !hit.face) {
-      this.onHover(null);
-      return;
-    }
+    if (!hit || !hit.face) return null;
     const pos = this.shell.geometry.getAttribute('position') as THREE.BufferAttribute;
     const cand = [hit.face.a, hit.face.b, hit.face.c];
     let best = cand[0]!, bestD = Infinity;
@@ -353,7 +398,24 @@ export class Viewer {
       const d = hit.point.distanceToSquared(new THREE.Vector3(pos.getX(v), pos.getY(v), pos.getZ(v)));
       if (d < bestD) { bestD = d; best = v; }
     }
-    this.onHover({ vertex: best, point: [hit.point.x, hit.point.y, hit.point.z] });
+    return { vertex: best, point: [hit.point.x, hit.point.y, hit.point.z] };
+  }
+
+  setCsCatheter(path: number[], electrodes: number[], transseptal: number[]): void {
+    this.catheters.setCs(path, electrodes);
+    this.catheters.setTransseptal(transseptal);
+    this.dirty = true;
+  }
+
+  setRoving(f: RovingFrame | null): void {
+    this.catheters.setRoving(f);
+    this.dirty = true;
+  }
+
+  /** Camera right and up directions in world space (for keyboard nudges). */
+  screenAxes(): { right: [number, number, number]; up: [number, number, number] } {
+    const m = this.camera.matrixWorld.elements;
+    return { right: [m[0]!, m[1]!, m[2]!], up: [m[4]!, m[5]!, m[6]!] };
   }
 }
 

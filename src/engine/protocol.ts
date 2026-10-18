@@ -3,6 +3,8 @@ import type { PresetId } from '../core/ep/tissue';
 import type { IonicModelId } from '../core/ep/ionic';
 import type { FibrosisPattern } from '../core/ep/substrate';
 import type { RestitutionResult } from '../core/ep/calibrate';
+import type { RovingConfig } from '../core/catheter/roving';
+import type { ChannelDef, SignalSettings } from '../core/signals/recording';
 
 export type SimMode = 'eikonal' | 'rd';
 export type BackendPref = 'auto' | 'cpu';
@@ -50,6 +52,40 @@ export interface SimInfo {
   eikonalMs: number | null;
 }
 
+/** Static description of the recording setup, sent with every `ready`. */
+export interface RigInfo {
+  channels: ChannelDef[];
+  fs: number;
+  /** CS catheter centreline and electrode centres (flat xyz). */
+  csPath: number[];
+  csElectrodes: number[];
+  /** Transseptal entry point used to draw the roving catheter shaft. */
+  transseptal: number[];
+}
+
+/** Roving catheter pose and readouts, sent with frames. */
+export interface RovingFrame {
+  vertex: number;
+  config: RovingConfig;
+  /** Electrode centres (flat xyz × 4), tip end, axis, contact point and wall normal. */
+  electrodes: number[];
+  tipEnd: number[];
+  axis: number[];
+  contact: number[];
+  normal: number[];
+  force: number;
+  gap: number;
+  stability: { positionSd: number; forceMean: number; forceMin: number; forceMax: number; stable: boolean };
+}
+
+/** Processed channel samples: n × nCh row-major, uniform spacing 1/fs starting at t0 (ms). */
+export interface EgmChunk {
+  t0: number;
+  n: number;
+  nCh: number;
+  data: Float32Array;
+}
+
 export type ToWorker =
   | { type: 'init'; mesh: SurfaceMesh; config: SimConfig }
   | { type: 'configure'; config: Partial<SimConfig> }
@@ -59,12 +95,16 @@ export type ToWorker =
   | { type: 'reset' }
   | { type: 'setSpeed'; speed: number }
   | { type: 'requestActivation' }
-  | { type: 'runLab' };
+  | { type: 'runLab' }
+  | { type: 'placeRoving'; vertex: number }
+  | { type: 'rovingConfig'; config: Partial<RovingConfig> }
+  | { type: 'signals'; settings: SignalSettings }
+  | { type: 'motion'; enabled: boolean };
 
 export type FromWorker =
   | { type: 'status'; message: string }
-  | { type: 'ready'; info: SimInfo; config: SimConfig }
-  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean }
+  | { type: 'ready'; info: SimInfo; config: SimConfig; rig: RigInfo }
+  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null }
   | { type: 'activation'; t: number; last: Float32Array; beatStart: number; fibrotic: Uint8Array }
   | { type: 'lab'; preset: PresetId; ionic: IonicModelId; D0: number; cv: number; apd90: number; restitution: RestitutionResult }
   | { type: 'error'; message: string };

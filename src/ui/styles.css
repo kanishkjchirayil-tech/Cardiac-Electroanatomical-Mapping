@@ -75,14 +75,16 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .segmented button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .file input { font-size: 12px; color: var(--muted); }
 .muted { color: var(--muted); }
+.link { color: var(--accent); }
 .small { font-size: 11px; }
 .warnings { margin: 4px 0 0; padding-left: 16px; color: var(--warn); font-size: 11px; }
 .stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
 .stats dt { color: var(--muted); }
 .stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 
+.main-area { grid-area: main; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .viewport {
-  grid-area: main; position: relative; overflow: hidden;
+  flex: 1 1 auto; min-height: 200px; position: relative; overflow: hidden;
   background: radial-gradient(ellipse at 50% 40%, #1b2a36 0%, #0b1218 75%);
 }
 .viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; z-index: 0; }
@@ -145,8 +147,42 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .teacher-legend { border-color: var(--warn); }
 .legend-note { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; color: var(--muted); }
 
+/* Electrogram panel */
+.egm-panel { --egm-bg: #090f14; flex: 0 0 40%; min-height: 220px; display: flex; flex-direction: column; border-top: 1px solid var(--line); background: var(--egm-bg); }
+.egm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 5px 10px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px; }
+.egm-toolbar .segmented.compact button { padding: 2px 7px; font-size: 11px; }
+.egm-toolbar button { padding: 2px 7px; font-size: 11px; }
+.egm-toolbar button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.gain-group { display: inline-flex; gap: 8px; }
+.gain { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; font-size: 11px; }
+.gain button { padding: 0 6px; line-height: 16px; }
+.egm-toolbar label.inline { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; margin: 0; }
+.egm-toolbar select { padding: 1px 4px; font-size: 11px; }
+.readout { font-variant-numeric: tabular-nums; color: var(--text); }
+.readout.caliper { color: var(--warn); }
+.egm-stage { position: relative; flex: 1 1 auto; min-height: 0; }
+.egm-canvas, .egm-overlay { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.egm-overlay { cursor: crosshair; touch-action: none; }
+
+/* Catheter panel */
+.force-readout { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px; }
+.force-bar { flex: 1; height: 8px; background: #0d151c; border-radius: 4px; overflow: hidden; }
+.force-bar > div { height: 100%; transition: width 0.15s; }
+.force-bar .ok { background: #45c46b; }
+.force-bar .low { background: #8aa0b4; }
+.force-bar .high { background: var(--danger); }
+.force-num { font-variant-numeric: tabular-nums; min-width: 3.5em; text-align: right; }
+.chip { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid; }
+.chip-ok { color: #45c46b; border-color: #45c46b; }
+.chip-warn { color: var(--warn); border-color: var(--warn); }
+fieldset.band { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px 6px; margin: 4px 0; min-width: 0; }
+fieldset.band legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
+.band-row { display: flex; align-items: center; gap: 4px; }
+
 @media (max-width: 800px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: 48px 60vh auto 28px; grid-template-areas: 'top' 'main' 'side' 'status'; height: auto; min-height: 100%; }
+  .app { grid-template-columns: 1fr; grid-template-rows: 48px auto auto 28px; grid-template-areas: 'top' 'main' 'side' 'status'; height: auto; min-height: 100%; }
+  .main-area .viewport { flex: 0 0 auto; height: 55vh; }
+  .egm-panel { flex: 0 0 auto; height: 50vh; }
   .sidebar { border-right: 0; border-top: 1px solid var(--line); padding: 8px 16px; }
   .brand-sub { display: none; }
   .disclaimer { font-size: 10px; white-space: normal; text-align: center; }

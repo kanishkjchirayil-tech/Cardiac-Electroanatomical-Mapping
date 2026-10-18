@@ -5,6 +5,11 @@ import { standardViews, type ViewName } from '../render/views';
 import { regionColors, scalarColors, shellColors, viridis, cssGradient, writeColors, voltageColor, latColor, FIBROTIC, UNMAPPED, SHELL_COLOR } from '../render/colormaps';
 import { initSimulation, latestVm } from './sim-client';
 import { SimPanel } from './SimPanel';
+import { CatheterPanel, SignalsPanel } from './CatheterPanel';
+import { EgmPanel } from './EgmPanel';
+import * as C from './sim-client';
+import { walkOnSurface } from '../core/catheter/navigate';
+import { vertexAdjacency, type Adjacency } from '../core/mesh/topology';
 import { vToMv } from '../core/ep/ionic';
 import { REGIONS, Region } from '../core/mesh/regions';
 import { formatFromName, importMesh, parseMeshFile, type LabelSidecar } from '../core/mesh/io/import';
@@ -17,6 +22,7 @@ const THICKNESS_RANGE: [number, number] = [0.5, 3.0];
 const NARROW = typeof window !== 'undefined' && window.matchMedia('(max-width: 800px)').matches;
 
 let teacherBuf = new Float32Array(0);
+let adjacency: Adjacency | null = null;
 
 /** Range of the true activation map for the most recent beat (teacher view only). */
 function latRange(): { lo: number; hi: number } | null {
@@ -118,12 +124,33 @@ export function App() {
     viewer.current = v;
     v.onHover = (h) => (S.hover.value = h);
     v.onFps = (f) => (S.fps.value = f);
+    v.onSelect = (h) => C.placeRoving(h.vertex);
+    let lastDrag = -1;
+    v.onDrag = (h) => {
+      if (h.vertex !== lastDrag) C.placeRoving((lastDrag = h.vertex));
+    };
     void generate();
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
       const views = standardViews();
       const i = Number(e.key) - 1;
-      if (i >= 0 && i < views.length) v.setView(views[i]!.name, S.obliqueDeg.value);
+      if (i >= 0 && i < views.length) {
+        v.setView(views[i]!.name, S.obliqueDeg.value);
+        return;
+      }
+      // Arrow keys nudge the roving tip along the wall in screen directions.
+      const r = S.roving.peek(), m = S.mesh.peek();
+      if (e.key.startsWith('Arrow') && r && m) {
+        e.preventDefault();
+        const { right, up } = v.screenAxes();
+        const d = e.key === 'ArrowRight' ? right : e.key === 'ArrowLeft' ? right.map((x) => -x) : e.key === 'ArrowUp' ? up : up.map((x) => -x);
+        adjacency ??= vertexAdjacency(m.indices, m.region.length);
+        const to = walkOnSurface(m.positions, m.normals, adjacency, r.vertex, d as [number, number, number], e.shiftKey ? 0.5 : 2);
+        if (to !== r.vertex) C.placeRoving(to);
+      } else if (e.key === '[' || e.key === ']') {
+        const f = S.rovingConfig.peek().force + (e.key === ']' ? 5 : -5);
+        C.setRovingConfig({ force: Math.max(0, Math.min(60, f)) });
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -152,6 +179,15 @@ export function App() {
   useSignalEffect(() => viewer.current?.setLabelsVisible(S.showLabels.value));
   useSignalEffect(() => viewer.current?.setOpacity(S.opacity.value));
   useSignalEffect(() => viewer.current?.setClip(S.clip.value));
+  useSignalEffect(() => {
+    const r = S.rigInfo.value;
+    if (r) viewer.current?.setCsCatheter(r.csPath, r.csElectrodes, r.transseptal);
+  });
+  useSignalEffect(() => viewer.current?.setRoving(S.roving.value));
+  useSignalEffect(() => {
+    void S.mesh.value;
+    adjacency = null;
+  });
 
   return (
     <div class="app">
@@ -167,12 +203,15 @@ export function App() {
 
       <aside class="sidebar">
         <SimPanel />
+        <CatheterPanel />
+        <SignalsPanel />
         <AnatomyPanel />
         <DisplayPanel />
         <ClipPanel viewer={viewer} />
         <MeshInfoPanel />
       </aside>
 
+      <div class="main-area">
       <main class="viewport" ref={host}>
         <ViewToolbar viewer={viewer} />
         <Legend />
@@ -185,6 +224,8 @@ export function App() {
         )}
         {S.errorMsg.value && <div class="error" role="alert">{S.errorMsg.value}</div>}
       </main>
+      <EgmPanel />
+      </div>
 
       <StatusBar />
     </div>

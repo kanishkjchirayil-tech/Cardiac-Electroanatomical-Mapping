@@ -15,7 +15,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 |---|---|
 | **M1** — Mesh, rendering, camera views, region labels | ✅ done |
 | **M2** — Monodomain / eikonal solver, calibration, sinus rhythm | ✅ done |
-| M3 — Catheters, EGM synthesis, EGM panel | planned |
+| **M3** — Catheters, EGM synthesis, EGM panel | ✅ done |
 | M4 — Acquisition, annotation, LAT and voltage maps | planned |
 | M5 — Ablation and lesion tags | planned |
 | M6 — Pacing, entrainment, scenarios, case report | planned |
@@ -28,7 +28,7 @@ You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU w
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 1 min; mesh, solver, calibration, reentry, sinus rhythm)
+npm test           # Vitest suite (≈ 1.5 min; mesh, solver, calibration, reentry, sinus rhythm, electrograms)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
@@ -49,6 +49,10 @@ On first load the procedural atrium (~16.5 k vertices) is generated in a Web Wor
 | Wheel | Zoom |
 | `1`–`8` | Standard views: AP, PA, LAO 30°, RAO 30°, left lateral, right lateral, superior, inferior |
 | Hover the shell | Status bar shows region, wall thickness, vertex id, and LPS coordinates |
+| Click the shell | Place the roving catheter tip there |
+| Shift-drag on the shell | Slide the catheter tip across the wall |
+| Arrow keys | Nudge the tip 2 mm across the wall in the screen direction (with Shift: 0.5 mm) |
+| `[` / `]` | Contact force −5 g / +5 g |
 
 The sidebar has these panels:
 
@@ -63,6 +67,15 @@ The sidebar has these panels:
     activation map of the last beat, and fibrotic nodes. Mapping in M4 never uses it.
   - **Tissue lab** measures plane-wave CV, APD90, ERP, and S1–S2 restitution curves for the current
     tissue.
+- **Roving catheter**
+  - Contact force (g), contact angle and tilt direction, and electrode spacing (2-5-2 default).
+  - A live force bar and a **Stable / Unstable** badge. Stable means tip movement SD < 1 mm and
+    force 5–40 g over the last second.
+  - Cardiac and respiratory tip motion can be switched off.
+- **Signals**
+  - Mains interference (50 or 60 Hz, or off) and a notch filter.
+  - Noise level.
+  - Bipolar and unipolar band-pass corners (defaults 30–500 Hz and 1–240 Hz).
 - **Anatomy**
   - Generate a procedural LA. The seed sets anatomical variation and wall-thickness noise. Variability
     0 gives the canonical shape; 1 gives typical variation.
@@ -75,6 +88,19 @@ The sidebar has these panels:
   - View-aligned (or sagittal, coronal, axial), with an offset slider and a flip option.
   - Use it to look at the endocardium from inside.
 - **Mesh** — quality statistics.
+
+Below the 3D view is the **Electrograms** panel:
+
+- **Traces:** ECG I, II and V1; CS 9-10 → CS 1-2 from the fixed coronary-sinus decapolar; MAP 1-2
+  and MAP 3-4 bipolar; MAP 1 and MAP 2 unipolar.
+- **Sweep speed:** 25–200 mm/s.
+- **Gains:** per group, in mm/mV.
+- **Freeze** stops the sweep.
+- **Calipers:** drag on the traces to measure an interval and its rate; click to clear.
+- **Cycle length:** read from a selectable CS reference bipole.
+
+Electrograms are computed from the simulated tissue with a volume-conductor dipole model (MODEL.md
+§3). They are measurements, so they appear whether or not the teacher view is on.
 
 The orientation triad in the lower left shows **L/P/S**. The patient frame is LPS:
 +x = left, +y = posterior, +z = superior. Units are millimetres.
@@ -111,6 +137,8 @@ src/
     math/ rng.ts noise.ts
     mesh/          implicit atrium, surface nets, remeshing, labels, thickness, topology, geodesics, I/O
     ep/            FEM operators, ionic models, substrate, CPU and WebGPU solvers, eikonal, calibration
+    catheter/      CS decapolar and roving catheter geometry, contact and motion models, surface walking
+    signals/       lead fields, recording chain (noise, referencing, filters), ECG, activation detection
   engine/          simulation engine hosted in a worker (clock, sinus pacing, backend selection)
   render/          three.js viewer, colormaps, standard views (framework-free)
   workers/         mesh generation and simulation workers

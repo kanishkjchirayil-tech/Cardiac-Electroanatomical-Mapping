@@ -8,7 +8,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 
 - [1. Anatomy](#1-anatomy) — implemented (M1)
 - [2. Electrophysiology engine](#2-electrophysiology-engine) — implemented (M2)
-- [3. Catheters and signals](#3-catheters-and-signals) — *(planned, M3)*
+- [3. Catheters and signals](#3-catheters-and-signals) — implemented (M3)
 - [4. Mapping](#4-mapping) — *(planned, M4)*
 - [5. Ablation](#5-ablation) — *(planned, M5)*
 - [6. Pacing and scenarios](#6-pacing-and-scenarios) — *(planned, M6)*
@@ -438,7 +438,153 @@ The WebGPU target is ≥ 0.25× on a real GPU. It must be checked with `selftest
 hardware; the container has no GPU.
 
 ## 3. Catheters and signals
-*(planned, M3.)*
+
+Code: `src/core/signals/` (lead fields, filters, noise, recording, detection), `src/core/catheter/`
+(CS and roving geometry, motion, surface navigation), and `src/render/catheters.ts` (graphics only).
+
+### 3.1 Extracellular potentials: dipole-source lead fields
+
+In an infinite homogeneous volume conductor, the extracellular potential at an electrode at x is a
+sum of current dipoles p = −σ_i ∇Vm:
+
+φ(x) = −K ∫ ∇Vm(y) · ∇_y(1/|x − y|) dV = −K ∫ ∇Vm(y) · (x − y)/|x − y|³ dV,  with K = σ_i / (4π σ_e).
+
+- **Per-triangle sources.** ∇Vm is constant on each P1 triangle. Each triangle is one dipole source:
+  - Location: at mid-wall, y = centroid + n·t/2, where n is the outward (epicardial) normal and t
+    the mean wall thickness of the triangle.
+  - Volume: area × viable thickness × source scale, where viable thickness = t·(1 − fibrosis depth).
+  - Zero volume if any corner is inexcitable: no intracellular coupling crosses a fibrotic node or a
+    lesion core, so scar produces no impressed current.
+- **Lead fields.** ∇Vm on a triangle is Σ_k Vm_k ∇φ_k (barycentric basis gradients), so the
+  potential is linear in the vertex potentials: **φ(x) = Σ_k c_k(x) v_k**. Each electrode gets a
+  precomputed sparse lead-field vector c.
+  - Vm = −80 + 100·v mV; the constant offset has no gradient.
+  - Sampling an electrogram is a sparse dot product. The CPU backend runs it inside the solver loop;
+    on WebGPU a reduction kernel runs once per sample in the same command buffer, so no voltage
+    readback is needed.
+  - The two backends agree within 2.4·10⁻⁵ mV against signals peaking at 2 mV (`selftest.html`).
+- **Constants.** σ_i = 0.17 S/m (longitudinal intracellular conductivity; Clerc 1976) and
+  σ_blood = 0.7 S/m (Geddes & Baker 1967), so **K = 0.019** for intracardiac electrodes.
+  - Contributions are summed over triangles within a **30 mm cutoff** of the electrode, as the spec
+    requires; this truncates part of the distant far field.
+  - Body-surface electrodes use σ_torso = 0.2 S/m, no cutoff, and a lumped `TORSO_GAIN` of 2.5
+    (§3.4).
+- **Checks** (`tests/signals.test.ts`):
+  - Lead fields equal an independently computed dipole sum.
+  - An approaching wavefront gives positive potential and a receding one negative.
+  - Inexcitable tissue contributes nothing.
+- **Sampling.** Electrograms are sampled at **2 kHz** (every 5 steps at dt = 0.1 ms). In eikonal
+  mode, the same lead fields are applied to Vm synthesized from the action-potential template.
+  - The ECG and CS electrodes are fixed, so their signals for one sinus cycle are precomputed and
+    replayed.
+  - The roving catheter's signals are evaluated per sample.
+
+### 3.2 Catheters
+
+**CS reference (decapolar).** The catheter is built from the mitral-annulus loop:
+
+- The centreline runs in the annulus plane, displaced 5 mm radially outward and 6 mm towards the
+  atrium.
+- Every point is pushed outside the epicardium of the nearest wall: wall thickness + 1.5 mm.
+- The arc runs from the posteroseptal side (CS ostium, 55° septal from the posterior-inferior
+  direction) round the inferior/posterior annulus towards the lateral wall.
+- Electrodes are placed by arc length with **2-8-2 mm** spacing. CS 10 is proximal and septal;
+  CS 1 is distal and lateral.
+- Bipoles are CS 9-10 … CS 1-2.
+
+**Roving catheter.** A 3.5 mm tip and three 1 mm rings, with selectable edge-to-edge spacing
+(default 2-5-2 mm; also 1-6-1, 2-2-2, 1-4-1). Diameter is 2.4 mm.
+
+- **Placement:** click or shift-drag onto the shell (raycast to the nearest vertex). Arrow keys walk
+  2 mm (0.5 mm with Shift) across the surface in the screen direction. `[` and `]` change force by
+  5 g.
+- **Axis:** tilted from the inward normal by the contact angle (0° perpendicular, 90° parallel),
+  towards an azimuth in the tangent plane.
+- **Contact model:** the gap between the tip end and the tissue is g(F) = 3 mm · e^(−F/4 g). That
+  is 3 mm when floating, 0.9 mm at 5 g, and under 0.05 mm at 20 g. A tilted tip touches with its
+  edge, so it is lifted by r·sin θ.
+  - Electrode centres lie along the axis. With good perpendicular contact the tip electrode centre
+    is about 1.75 mm from the endocardium, and about 1.2 mm when parallel.
+  - The 30 mm cutoff and mid-wall sources give the expected behaviour: poor contact lowers local
+    amplitude and relatively increases far-field content (floating vs 15 g: bipolar 0.62 vs
+    1.62 mV).
+- **Motion and stability (phenomenological).** The tip is displaced by:
+  - a cardiac component at the sinus cycle length, amplitude 1.2·e^(−F/20) + 0.2 mm;
+  - a respiratory component (0.25 Hz), amplitude 2.0·e^(−F/15) + 0.3 mm;
+  - Ornstein–Uhlenbeck drift (τ 2 s, SD 0.6·e^(−F/15) + 0.1 mm).
+
+  Force fluctuates by ±30 % (cardiac) and ±15 % (respiratory), plus OU noise (τ 0.5 s). The pose and
+  the roving lead fields are updated every **20 ms** of simulated time.
+- **Stability readout.** The SD of tip position over the last second, and the force mean and range.
+  "Stable" means SD < 1 mm and force within 5–40 g throughout. M4 auto-acquisition will use the same
+  criteria.
+
+### 3.3 Recording chain
+
+Each processing step is applied in this order, mirroring an EP amplifier (`recording.ts`):
+
+1. **Artifacts**, added to each electrode's raw potential (`noise.ts`):
+   - Mains interference (50 or 60 Hz): 0.15 mV common-mode, with a 3 % per-electrode amplitude
+     mismatch and ±0.02 rad phase spread.
+   - Baseline wander: 0.3 mV, mostly at 0.25 Hz respiration.
+   - Colored noise: an AR(2) process, coefficients (1.2, −0.36), SD 0.012 mV.
+
+   Body-surface electrodes get 10 % of these amplitudes.
+2. **Referencing.**
+   - Bipolar channels are electrode differences: MAP 1-2, MAP 3-4, CS pairs.
+   - Unipolar channels and V1 are referenced to the Wilson central terminal, (RA + LA + LL)/3.
+   - Limb leads: I = LA − RA, II = LL − RA.
+
+   Because mains pickup is nearly common-mode, the bipolar residual is < 15 % of the unipolar
+   (tested).
+3. **Causal band-pass filters.** Each is a 2nd-order Butterworth high-pass and low-pass, each applied
+   twice (4th order; −6 dB at each corner).
+   - Defaults: **bipolar 30–500 Hz**, **unipolar 1–240 Hz**, ECG 0.5–100 Hz.
+   - An optional mains notch (Q = 30) is available.
+   - All corners are adjustable in the Signals panel.
+
+### 3.4 Surface ECG
+
+Electrodes sit at fixed torso points relative to the LA (LPS mm):
+
+| Electrode | Position |
+|---|---|
+| RA | (−260, −60, 220) |
+| LA | (260, −60, 220) |
+| LL | (90, −60, −420) |
+| V1 | (−35, −150, 10) |
+
+The potentials are computed in an infinite homogeneous medium (σ = 0.2 S/m) with a lumped gain of
+2.5. The gain stands in for the missing right atrium and torso inhomogeneity; it is an educational
+calibration, not a forward model.
+
+Result in sinus rhythm: the LA component in lead II is ≈ 0.05 mV peak-to-peak, and V1 has a
+terminal negative deflection (≈ −0.11 mV), the left-atrial signature.
+
+### 3.5 EGM panel
+
+- **Channels**, top to bottom: I, II, V1; CS 9-10 → CS 1-2; MAP 1-2, MAP 3-4; MAP 1 and MAP 2
+  unipolar.
+- **Sweep speed:** 25 / 50 / 100 / 200 mm/s, at 96 CSS px per inch.
+- **Gains:** per group, in mm/mV. Defaults: ECG 60, CS 6, MAP bipolar 6, unipolar 3.
+- **Drawing:** each pixel column shows the min/max of its samples, so spikes are never aliased away.
+- **Freeze** stops the sweep. **Calipers:** drag on the traces to read Δt and rate; click to clear.
+- **Cycle length:** the median of the last six intervals between activations on a selectable CS
+  reference bipole.
+  - Activations are detected as local maxima of |x| above 40 % of the 6 s peak, with a 120 ms
+    refractory window.
+
+### 3.6 Validation
+
+Checked by `tests/egm.test.ts` on reaction–diffusion sinus beats:
+
+| Check | Result |
+|---|---|
+| Healthy bipolar amplitude | 1.4–1.7 mV at posterior, anterior and lateral sites (normal is > 0.5 mV) |
+| Bipolar in scar | 70 % diffuse fibrosis on the posterior wall drops the same sites to 0.14–0.23 mV, 10–16 % of healthy. Anterior sites in the same atrium change by < 25 %. |
+| Persistent-AF substrate | median bipolar 1.06 vs 1.72 mV healthy |
+| Unipolar morphology | **QS** at the earliest site (Bachmann's bundle): −2.46 mV with ≤ +0.16 mV positive. **RS** where the wave passes the lateral wall: +1.50 / −0.64 mV, R before S. |
+| CS activation sequence | proximal → distal in sinus rhythm (CS 9-10 ≈ 50 ms, CS 1-2 ≈ 95 ms after onset) |
 
 ## 4. Mapping
 *(planned, M4.)*
@@ -468,6 +614,21 @@ hardware; the container has no GPU.
   before the solver calibration holds.
 - **Geodesic error.** Edge-graph Dijkstra overestimates geodesic distance by up to about 9 %. This is
   used for labelling only.
+
+### Signals (M3)
+- **Infinite homogeneous conductor.** The model has no blood/tissue conductivity boundary, no
+  torso, lungs or spine, and no electrode–tissue interface impedance. Absolute amplitudes are
+  therefore approximate, though their dependence on distance, contact, wall thickness and scar is
+  physical.
+- **Point electrodes.** There is no spatial averaging over the 3.5 mm tip, so very close electrodes
+  are slightly over-sharp.
+- **No ventricles or right atrium.** The CS and unipolar channels lack the ventricular far field
+  that dominates real CS recordings, and the P wave lacks its right-atrial half.
+- **Phenomenological contact and motion.** Force maps to distance by an assumed exponential. Motion
+  amplitudes are illustrative, not measured.
+- **Truncated far field.** Intracardiac lead fields sum sources within 30 mm only.
+- **Eikonal-mode signals** use a fixed action-potential template, so they are a little sharper than
+  reaction–diffusion signals and show no rate-dependent changes.
 
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
@@ -519,3 +680,7 @@ hardware; the container has no GPU.
 22. Rensma PL, Allessie MA, Lammers WJ, Bonke FI, Schalij MJ. Length of excitation wave and susceptibility to reentrant atrial arrhythmias in normal conscious dogs. *Circ Res* 1988;62:395–410.
 23. Markides V, Schilling RJ, Ho SY, Chow AW, Davies DW, Peters NS. Characterization of left atrial activation in the intact human heart. *Circulation* 2003;107:733–739.
 24. Lemery R, Birnie D, Tang ASL, Green M, Gollob M, Hendry M, Lau E. Normal atrial activation and voltage during sinus rhythm in the human heart: an endocardial and epicardial mapping study in patients with a history of atrial fibrillation. *J Cardiovasc Electrophysiol* 2007;18:402–408.
+25. Clerc L. Directional differences of impulse spread in trabecular muscle from mammalian heart. *J Physiol* 1976;255:335–346.
+26. Geddes LA, Baker LE. The specific resistance of biological material — a compendium of data for the biomedical engineer and physiologist. *Med Biol Eng* 1967;5:271–293.
+27. Plonsey R, Barr RC. *Bioelectricity: A Quantitative Approach*, 3rd ed. Springer, 2007 (volume-conductor dipole sources).
+28. Stevenson WG, Soejima K. Recording techniques for clinical electrophysiology. *J Cardiovasc Electrophysiol* 2005;16:1017–1022.

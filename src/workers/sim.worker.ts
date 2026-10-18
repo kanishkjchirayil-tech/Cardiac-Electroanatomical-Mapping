@@ -17,5 +17,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case 'setSpeed': engine.setSpeed(m.speed); break;
     case 'requestActivation': void engine.requestActivation(); break;
     case 'runLab': void engine.runLab(); break;
+    case 'placeRoving': void engine.placeRoving(m.vertex); break;
+    case 'rovingConfig': void engine.setRovingConfig(m.config); break;
+    case 'signals': void engine.setSignals(m.settings); break;
+    case 'motion': void engine.setMotion(m.enabled); break;
   }
 };

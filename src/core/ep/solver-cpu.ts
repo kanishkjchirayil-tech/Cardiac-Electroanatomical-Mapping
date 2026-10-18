@@ -1,6 +1,7 @@
 import { buildDiffusion, stableDiffusionDt, type DiffusionOperator, type TissueGeometry } from './fem';
 import type { IonicModel } from './ionic';
-import { ACT_THRESHOLD, REPOL_THRESHOLD, type ActivationRecord, type BackendInit, type SolverBackend } from './backend';
+import { ACT_THRESHOLD, REPOL_THRESHOLD, packLeadFields, SampleBuffer, type ActivationRecord, type BackendInit, type EgmSamples, type SolverBackend } from './backend';
+import type { LeadField } from '../signals/leadfield';
 import { MAX_STIM_SITES } from './stimulus';
 
 /**
@@ -27,6 +28,10 @@ export class CpuBackend implements SolverBackend {
   private exc: Uint8Array;
   private siteOf: Int32Array;
   private act: ActivationRecord;
+  private lf = packLeadFields([]);
+  private sampleEvery = 0;
+  private stepCount = 0;
+  private samples = new SampleBuffer(0);
 
   constructor(init: BackendInit) {
     this.geom = init.geom;
@@ -101,7 +106,29 @@ export class CpuBackend implements SolverBackend {
           act.repol[i] = tStart + (dt * (a - REPOL_THRESHOLD)) / (a - b);
         }
       }
+      this.stepCount++;
+      if (this.sampleEvery > 0 && this.stepCount % this.sampleEvery === 0) {
+        const { rowPtr, idx, w: lw } = this.lf;
+        const rows = rowPtr.length - 1;
+        const vals = new Float32Array(rows);
+        for (let r = 0; r < rows; r++) {
+          let acc = 0;
+          for (let k = rowPtr[r]!; k < rowPtr[r + 1]!; k++) acc += lw[k]! * v[idx[k]!]!;
+          vals[r] = acc;
+        }
+        this.samples.push(tStart + dt, vals);
+      }
     }
+  }
+
+  setLeadFields(rows: LeadField[], sampleEvery: number): void {
+    this.lf = packLeadFields(rows);
+    this.sampleEvery = rows.length ? sampleEvery : 0;
+    if (this.samples.rows !== rows.length) this.samples = new SampleBuffer(rows.length);
+  }
+
+  drainSamples(): EgmSamples {
+    return this.samples.drain();
   }
 
   readV(): Float32Array {
