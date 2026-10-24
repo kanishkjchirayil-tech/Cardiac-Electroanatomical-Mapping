@@ -13,7 +13,9 @@ export function AblationPanel() {
   const r = S.roving.value;
   const rf = S.rf.value;
   const m = S.mesh.value;
-  const lesions = S.lesions.value;
+  const all = S.lesions.value;
+  const lesions = all.filter((l) => !l.prior);
+  const prior = all.length - lesions.length;
   const isAblation = r?.config.type === 'ablation';
   const zone = S.esophagealZone.value;
   const overEsophagus = !!(r && zone && zone[r.vertex]);
@@ -84,7 +86,7 @@ export function AblationPanel() {
         </label>
       </div>
       <p class="muted small">
-        {lesions.length} lesion{lesions.length === 1 ? '' : 's'}
+        {lesions.length} lesion{lesions.length === 1 ? '' : 's'}{prior ? ` (+${prior} from the previous procedure, grey tags)` : ''}
         {gaps > 0 ? <span class="warn-text"> · {gaps} gap{gaps === 1 ? '' : 's'} &gt; {a.gapThreshold} mm</span> : null}
       </p>
       {lesions.length > 0 && (
@@ -113,7 +115,7 @@ export function AblationPanel() {
         </div>
       )}
       <div class="point-actions">
-        <button id="rf-reset" disabled={!lesions.length} onClick={() => { if (confirm('Remove all lesions and restore the tissue?')) C.resetLesions(); }}>Reset lesions</button>
+        <button id="rf-reset" disabled={!lesions.length} onClick={() => { if (confirm('Remove your lesions and restore the tissue?')) C.resetLesions(); }}>Reset lesions</button>
       </div>
       <p class="muted small">LQI = 10 × predicted depth / local wall thickness (10 ⇔ transmural). Tags: green ≥ 10, amber 8–10, red &lt; 8. Δ prev = distance to the previous lesion; jumps &gt; {NEW_SET_DISTANCE} mm start a new set.</p>
     </section>

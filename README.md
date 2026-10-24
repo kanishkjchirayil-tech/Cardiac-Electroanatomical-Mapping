@@ -18,7 +18,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | **M3** — Catheters, EGM synthesis, EGM panel | ✅ done |
 | **M4** — Acquisition, annotation, LAT and voltage maps | ✅ done |
 | **M5** — Ablation and lesion tags | ✅ done |
-| M6 — Pacing, entrainment, scenarios, case report | planned |
+| **M6** — Pacing, entrainment, scenarios, case report | ✅ done |
 | M7 — Autonomic module, dataset export, batch mode | planned |
 
 ## Running
@@ -28,7 +28,7 @@ You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU w
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 3 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy, ablation block vs gap)
+npm test           # Vitest suite (≈ 7 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy, ablation block vs gap, pacing, scenario endpoints)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
@@ -59,6 +59,28 @@ On first load the procedural atrium (~16.5 k vertices) is generated in a Web Wor
 
 The sidebar has these panels:
 
+- **Case**
+  - Pick a **scenario** and a **case seed** (or a random one), then **Start case**. Each seed gives a
+    different hidden ground truth: trigger veins, focus site, gap position, fibrosis, cycle lengths.
+  - | Scenario | Goal |
+    |---|---|
+    | Sinus rhythm mapping | Map the LA and find the earliest breakthrough. |
+    | Paroxysmal AF — PV triggers | Isolate all veins; prove entrance and exit block. |
+    | Persistent AF — remodeled substrate | Isolate the veins and restore sinus rhythm (cardioversion allowed). |
+    | Perimitral flutter | Diagnose it, then terminate it with a mitral isthmus line; prove block by pacing. |
+    | Roof-dependent flutter | Diagnose it, then terminate it with a roof line; prove block by pacing. |
+    | Focal atrial tachycardia | Find the earliest site and ablate the focus. |
+    | Redo PVI — reconnection gap | Find the reconnected vein and close the gap. |
+  - The briefing shows the presentation, goal and success criteria (never the answer).
+  - The arrhythmia starts by itself when you press **Run**.
+  - **Cardiovert** resets the heart to rest.
+  - **End case · report** opens the end-of-case report:
+    - the criteria, each passed or failed, with the reason;
+    - map quality and the lesion set;
+    - true block per vein and per line;
+    - procedure time, safety warnings, and what was really going on.
+
+    It can be downloaded as JSON.
 - **Simulation**
   - **Eikonal (fast)** computes a sinus activation map instantly by fast marching. **Reaction–diffusion**
     runs the full monodomain model, which you need for reentry, refractoriness and (from M6) pacing.
@@ -111,6 +133,17 @@ The sidebar has these panels:
     translucent tube behind the posterior wall.
   - Lesions change the tissue itself. Transmural cores stop conduction, partial lesions only slow
     it, and electrograms over ablated tissue shrink. Map before and after to check for block.
+- **Pacing** (reaction–diffusion engine)
+  - Site: CS 1-2 (distal), CS 9-10 (proximal) or the ablation tip. Output 0.2–20 mA.
+  - Protocols: fixed rate, burst, S1–S2 (premature extrastimulus), and entrainment.
+  - Capture depends on output, tip contact, and the tissue under the electrode. Scar does not
+    capture.
+  - Readouts, all measured from the electrograms:
+    - local capture;
+    - whether the CS follows 1:1 (for exit block);
+    - stimulus-to-electrogram time and distance for every bipole (for differential pacing);
+    - TCL, PPI and **PPI − TCL** after entrainment (≤ 30 ms means the tip is in the circuit).
+  - Red marks on the EGM panel show the stimuli.
 - **Signals**
   - Mains interference (50 or 60 Hz, or off) and a notch filter.
   - Noise level.
@@ -180,7 +213,9 @@ src/
     signals/       lead fields, recording chain (noise, referencing, filters), ECG, beat windows, detection
     mapping/       annotation, mapping session (filters, undo), geodesic interpolation — sees signals only
     ablation/      RF application, empirical lesion model and raster, edema, esophagus, lesion-set helpers
-  engine/          simulation engine hosted in a worker (clock, sinus pacing, backend selection)
+    pacing/        capture model, protocols, signal-based pacing measurements
+    scenarios/     seeded clinical scenarios, conduction-topology ground truth, case evaluation
+  engine/          simulation engine hosted in a worker (clock, backend selection, rhythm drivers, case runtime)
   render/          three.js viewer, colormaps, standard views (framework-free)
   workers/         mesh generation and simulation workers
   selftest/        CPU-vs-WebGPU comparison page (selftest.html)

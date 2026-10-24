@@ -2,7 +2,9 @@ import { signal } from '@preact/signals';
 import type { SurfaceMesh } from '../core/mesh/types';
 import type { MeshQuality } from '../core/mesh/quality';
 import type { ClipState, HoverInfo } from '../render/viewer';
-import { DEFAULT_SIM_CONFIG, type RfFrame, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_SIM_CONFIG, type CaseGroundTruth, type PacingStatus, type RfFrame, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_PACING, type PacingRequest } from '../core/pacing/protocols';
+import type { ScenarioId, ScenarioPublic } from '../core/scenarios/scenarios';
 import { DEFAULT_ABLATION, type AblationSettings } from '../core/ablation/controller';
 import type { Lesion } from '../core/ablation/lesion';
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
@@ -74,3 +76,14 @@ export const showLesionTags = signal(true);
 export const showEsophagus = signal(true);
 /** Deliver each application at once instead of on the (accelerated) RF clock. */
 export const rfInstant = signal(false);
+
+// ---- Pacing and scenarios ----
+export const pacingRequest = signal<PacingRequest>({ ...DEFAULT_PACING });
+export const pacingStatus = signal<PacingStatus | null>(null);
+/** Most recent finished manoeuvre (kept visible after pacing stops). */
+export const lastPacing = signal<PacingStatus | null>(null);
+export const scenario = signal<ScenarioPublic | null>(null);
+export const scenarioChoice = signal<ScenarioId | 'free'>('free');
+export const scenarioSeed = signal(1);
+export const caseReport = signal<CaseGroundTruth | null>(null);
+export const reportOpen = signal(false);

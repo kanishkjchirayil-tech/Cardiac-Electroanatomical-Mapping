@@ -26,5 +26,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case 'rfStart': void engine.rfStart(m.instant); break;
     case 'rfStop': void engine.rfStop(); break;
     case 'resetLesions': void engine.resetLesions(); break;
+    case 'pace': void engine.pace(m.request); break;
+    case 'paceStop': void engine.paceStop(); break;
+    case 'cardiovert': void engine.cardiovert(); break;
+    case 'requestReport': void engine.requestReport(); break;
   }
 };

@@ -6,11 +6,15 @@ import { EgmStore } from './egm-store';
 import type { RovingConfig } from '../core/catheter/roving';
 import type { SignalSettings } from '../core/signals/recording';
 import type { AblationSettings } from '../core/ablation/controller';
+import type { PacingRequest } from '../core/pacing/protocols';
+import type { ScenarioId } from '../core/scenarios/scenarios';
 import { EGM_FS } from '../core/signals/rig';
 import * as M from './mapping-state';
 
 /** Recorded channels (main thread), filled from worker frames. */
 export const egmStore = new EgmStore(0, EGM_FS);
+/** Pacing stimulus times (ms) for the EGM panel markers. */
+export const stimMarks: number[] = [];
 
 /** Main-thread handle to the simulation worker; mirrors worker messages into UI signals. */
 let worker: Worker | null = null;
@@ -33,6 +37,8 @@ function ensureWorker(): Worker {
         S.simInfo.value = m.info;
         S.simConfig.value = m.config;
         S.rigInfo.value = m.rig;
+        S.scenario.value = m.scenario;
+        stimMarks.length = 0;
         egmStore.reset(m.rig.channels.length, 0);
         S.simStatus.value = '';
         S.gtActivation.value = null;
@@ -45,6 +51,10 @@ function ensureWorker(): Worker {
         S.simRunning.value = m.running;
         S.vmFrameId.value++;
         if (m.rf || S.rf.peek()) S.rf.value = m.rf;
+        if (m.stims.length) {
+          stimMarks.push(...m.stims);
+          if (stimMarks.length > 400) stimMarks.splice(0, stimMarks.length - 400);
+        }
         if (m.egm) {
           egmStore.append(m.egm);
           S.egmVersion.value++;
@@ -64,6 +74,17 @@ function ensureWorker(): Worker {
         S.esophagealZone.value = m.esophagealZone;
         // The tissue changed: refresh the teacher's ground-truth view.
         if (S.teacherView.peek() && S.teacherOverlay.peek() !== 'vm') requestActivation();
+        break;
+      case 'pacing':
+        S.pacingStatus.value = m.status?.active ? m.status : null;
+        if (m.status) S.lastPacing.value = m.status;
+        break;
+      case 'reference':
+        S.referenceChannel.value = m.name;
+        break;
+      case 'report':
+        S.caseReport.value = m.report;
+        S.reportOpen.value = true;
         break;
       case 'beat':
         M.onBeat(m.beat);
@@ -152,3 +173,18 @@ export const setAblationSettings = (patch: Partial<AblationSettings>) => {
 export const rfStart = () => send({ type: 'rfStart', instant: S.rfInstant.peek() });
 export const rfStop = () => send({ type: 'rfStop' });
 export const resetLesions = () => send({ type: 'resetLesions' });
+
+export const pace = (request: PacingRequest) => {
+  S.pacingRequest.value = request;
+  send({ type: 'pace', request });
+};
+export const paceStop = () => send({ type: 'paceStop' });
+export const cardiovert = () => send({ type: 'cardiovert' });
+export const requestReport = () => send({ type: 'requestReport' });
+/** Start a scenario case (or return to free simulation). */
+export const startCase = (id: ScenarioId | 'free', seed: number) => {
+  S.lastPacing.value = null;
+  S.caseReport.value = null;
+  configure({ scenario: id === 'free' ? null : { id, seed, run: Date.now() } });
+  M.initMapping(S.mesh.peek()!);
+};

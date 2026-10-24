@@ -12,16 +12,21 @@ export function SimPanel() {
   const cfg = S.simConfig.value;
   const info = S.simInfo.value;
   const busy = !info;
+  const sc = S.scenario.value;
   return (
     <section class="panel">
       <h2>Simulation</h2>
       <div class="segmented" role="radiogroup" aria-label="Solver mode">
         {(['eikonal', 'rd'] as const).map((m) => (
-          <button key={m} id={`mode-${m}`} role="radio" aria-checked={cfg.mode === m} class={cfg.mode === m ? 'on' : ''} onClick={() => C.configure({ mode: m })}>
+          <button key={m} id={`mode-${m}`} role="radio" aria-checked={cfg.mode === m} class={cfg.mode === m ? 'on' : ''} disabled={m === 'eikonal' && !!sc?.requiresRd} onClick={() => C.configure({ mode: m })}>
             {m === 'eikonal' ? 'Eikonal (fast)' : 'Reaction–diffusion'}
           </button>
         ))}
       </div>
+      {sc ? (
+        <p class="muted small">Tissue, sinus rate and prior lesions are set by the case ({sc.name}). Choose “Free simulation” in the Case panel to change them.</p>
+      ) : (
+      <>
       <label>Tissue
         <select id="sim-preset" value={cfg.preset} onChange={(e) => C.configure({ preset: e.currentTarget.value as PresetId })}>
           {Object.values(PRESETS).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -54,6 +59,8 @@ export function SimPanel() {
           </select>
         </label>
       </div>
+      </>
+      )}
 
       <div class="transport" role="toolbar" aria-label="Simulation clock">
         {S.simRunning.value

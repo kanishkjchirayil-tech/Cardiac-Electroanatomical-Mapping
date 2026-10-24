@@ -109,6 +109,13 @@ export function EgmPanel() {
         ctx.fillText(`${((k100 * 100) / 1000).toFixed(1)} s`, x + 3, H - 3);
       }
     }
+    // Pacing stimulus markers.
+    ctx.fillStyle = 'rgba(239,107,91,0.85)';
+    for (const ts of C.stimMarks) {
+      const col = Math.floor(ts * pxPerMs);
+      if (col < from || col > lastCol) continue;
+      ctx.fillRect(LABEL_W + (col - firstCol), 0, 1.5, H - 14);
+    }
     const fs = egmStore.fs;
     for (let row = 0; row < n; row++) {
       const ch = rowsNow[row]!.c, c = rowsNow[row]!.i;

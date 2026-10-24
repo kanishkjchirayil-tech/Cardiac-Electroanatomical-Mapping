@@ -4,6 +4,9 @@ import { Viewer } from '../render/viewer';
 import { standardViews, type ViewName } from '../render/views';
 import { regionColors, scalarColors, shellColors, viridis, cssGradient, writeColors, voltageColor, latColor, FIBROTIC, UNMAPPED, SHELL_COLOR, LESION_CORE, LESION_BORDER, lesionTagColor, type RGB } from '../render/colormaps';
 import { AblationPanel } from './AblationPanel';
+import { PacingPanel } from './PacingPanel';
+import { ScenarioPanel } from './ScenarioPanel';
+import { ReportModal } from './ReportModal';
 import { lesionGaps } from '../core/ablation/lesion';
 import { initSimulation, latestVm } from './sim-client';
 import { SimPanel } from './SimPanel';
@@ -28,6 +31,8 @@ const THICKNESS_RANGE: [number, number] = [0.5, 3.0];
 const NARROW = typeof window !== 'undefined' && window.matchMedia('(max-width: 800px)').matches;
 
 const ESOPHAGEAL_ZONE: RGB = [0.86, 0.74, 0.5];
+/** Lesions from a previous procedure (scenario setup). */
+const PRIOR_TAG: RGB = [0.55, 0.56, 0.6];
 let teacherBuf = new Float32Array(0);
 let mapBuf = new Float32Array(0);
 /** Latest map product (recomputed when points or map settings change). */
@@ -220,10 +225,11 @@ export function App() {
     const v = viewer.current, ls = S.lesions.value, threshold = S.ablationSettings.value.gapThreshold;
     if (!v) return;
     if (!S.showLesionTags.value) return v.setLesionTags([], null);
-    const gaps = lesionGaps(ls, threshold);
+    const mine = ls.filter((l) => !l.prior);
+    const gaps = lesionGaps(mine, threshold);
     const seg = new Float32Array(gaps.length * 6);
-    gaps.forEach((i, k) => { seg.set(ls[i - 1]!.center, 6 * k); seg.set(ls[i]!.center, 6 * k + 3); });
-    v.setLesionTags(ls.map((l) => ({ position: l.center, color: l.active ? [1, 1, 1] : lesionTagColor(l.lqi), active: l.active })), seg);
+    gaps.forEach((i, k) => { seg.set(mine[i - 1]!.center, 6 * k); seg.set(mine[i]!.center, 6 * k + 3); });
+    v.setLesionTags(ls.map((l) => ({ position: l.center, color: l.prior ? PRIOR_TAG : l.active ? [1, 1, 1] : lesionTagColor(l.lqi), active: l.active })), seg);
   });
   useSignalEffect(() => {
     const r = S.rigInfo.value;
@@ -291,10 +297,12 @@ export function App() {
       </header>
 
       <aside class="sidebar">
+        <ScenarioPanel />
         <SimPanel />
         <CatheterPanel />
         <MappingPanel />
         <AblationPanel />
+        <PacingPanel />
         <SignalsPanel />
         <AnatomyPanel />
         <DisplayPanel />
@@ -319,6 +327,7 @@ export function App() {
       </div>
 
       <StatusBar />
+      <ReportModal />
     </div>
   );
 }

@@ -167,9 +167,10 @@ export class AblationController {
     }
   }
 
+  /** Remove this procedure's lesions (lesions from a previous procedure stay). */
   reset(): void {
     this.rf = null;
-    this.lesions = [];
+    this.lesions = this.lesions.filter((l) => l.prior);
   }
 }
 

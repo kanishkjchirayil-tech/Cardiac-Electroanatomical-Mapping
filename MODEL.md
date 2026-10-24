@@ -11,7 +11,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 - [3. Catheters and signals](#3-catheters-and-signals) — implemented (M3)
 - [4. Mapping](#4-mapping) — implemented (M4)
 - [5. Ablation](#5-ablation) — implemented (M5)
-- [6. Pacing and scenarios](#6-pacing-and-scenarios) — *(planned, M6)*
+- [6. Pacing and scenarios](#6-pacing-and-scenarios) — implemented (M6)
 - [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — *(planned, M7)*
 - [Known limitations](#known-limitations)
 - [References](#references)
@@ -861,7 +861,240 @@ while 20–25 W applications of 10 s stay below it.
   eikonal activation map. Resetting lesions restores the tissue.
 
 ## 6. Pacing and scenarios
-*(planned, M6.)*
+
+Code: `src/core/pacing/` (`capture.ts`, `protocols.ts`, `analysis.ts`), `src/core/scenarios/`
+(`scenarios.ts`, `topology.ts`, `geometry.ts`, `report.ts`), and the engine runtime in
+`src/engine/drivers.ts` and `src/engine/case.ts`.
+
+Pacing, ectopy and arrhythmias need the reaction–diffusion engine. The eikonal mode remains a
+sinus-rhythm-only map generator.
+
+### 6.1 Pacing
+
+**Sites.** Pacing can be delivered from:
+
+- the ablation catheter tip (cathode = tip electrode);
+- CS 1-2 (cathode CS 1, distal/lateral);
+- CS 9-10 (cathode CS 9, proximal/septal).
+
+**Capture model** (phenomenological). Current density from a small cathode falls roughly as
+1/r² [27]. The threshold therefore rises with the electrode–tissue gap d and falls with the viable
+fraction v of the myocardium under the electrode (mean over 1.5 mm):
+
+  I_th(d) = I₀ · (1 + (d / d₀)²) / v           I₀ = 0.4 mA, d₀ = 1 mm (2 ms pulse)
+
+- **Gap.** For the tip, d is the contact gap of §3.2 (3 mm at 0 g, 0.25 mm at 10 g). For the CS
+  electrodes it is their distance to the nearest endocardial vertex minus the catheter radius,
+  so CS pacing needs a few mA.
+- **Viable fraction.** v is 0 over lesion cores and fibrotic nodes, so dense scar never captures.
+  Partial-thickness lesions raise the threshold.
+- **Above threshold:**
+  - vertices within r = 1.5 mm · √(I/I_th) (≤ 5 mm) receive a 2 ms current pulse;
+  - the pulse amplitude scales with √(I/I_th), so a higher output captures earlier in the relative
+    refractory period.
+- **Propagation.** Whether a stimulus propagates is decided by the tissue state in the solver, so
+  loss of capture in refractory tissue, latency and fusion all emerge.
+- **Motion.** The tip footprint is updated with catheter motion every 20 ms.
+
+**Protocols.** Each one is converted to stimulus trains:
+
+| Protocol | Delivery |
+|---|---|
+| Fixed rate | Continuous, or N beats |
+| Burst | N beats at a short cycle length |
+| S1–S2 | N S1 beats, then a premature S2 (and optional S3) |
+| Entrainment | N beats, then a post-pacing-interval measurement |
+
+Stimulus markers are drawn on the EGM panel. There is no stimulus artifact on the signals.
+
+**Measurements** (recorded, filtered electrograms only). Each stimulus is analysed once 400 ms of
+signal after it has been recorded. The median over the three most recent paced beats is reported;
+the first two beats of a long train are skipped while it settles.
+
+- **Stimulus-to-electrogram interval.** For every CS bipole and the ablation catheter's bipoles:
+  the first local maximum of |x| above max(0.05 mV, 0.3 × the window peak), within [4 ms,
+  min(400 ms, CL − 5 ms)] after the stimulus. The distance from the cathode to each bipole is
+  reported alongside.
+- **Local capture.** Either the neighbouring bipole (MAP 3-4, CS 3-4 or CS 7-8) activates within
+  60 ms, or the pacing bipole itself shows an electrogram within 3–30 ms. The second check is
+  possible only because no stimulus artifact is simulated.
+- **CS follows 1:1** (tip pacing). Every recent stimulus is followed by an activation on the CS
+  reference within the pacing cycle. Local capture without CS follow is **exit block** [43].
+- **Entrainment.**
+  - TCL is the median CS-reference cycle length over the 3 s before pacing.
+  - PPI is the time from the last stimulus to the first activation on the pacing bipole. The search
+    starts max(80 ms, half the pacing CL) after the stimulus: the paced site was just captured and
+    is refractory, so earlier deflections belong to the last captured beat.
+  - PPI − TCL ≤ 30 ms marks a site in the circuit [39, 40].
+
+Measured on the perimitral case (seed 1, TCL 276 ms):
+
+| Pacing site | PPI − TCL |
+|---|---|
+| Annulus | 4 ms |
+| Septum | 57 ms |
+| LAA tip | 108 ms |
+
+**Sinus node with reset.** The LA breakthrough sites (§2.5) are driven by a sinus "node". The next
+beat is due one sinus cycle after the last activation of the Bachmann-bundle site, whatever
+caused that activation [44]. Faster rhythms (tachycardia or pacing) therefore suppress sinus
+beats, and sinus rhythm resumes when they stop. Activation is read by a **probe**: an internal
+lead-field row of weight 1 at one vertex, sampled at 2 kHz with the electrograms. Probes are
+hidden-state sensors used only by the rhythm drivers and for ground truth, never shown as
+signals.
+
+**Ectopic sources.**
+
+- **Automatic foci** fire at their own cycle length and are reset in the same way as the sinus
+  node.
+- **Triggered sources** (PV triggers) fire runs of 3–8 beats at 170–230 ms, every 3.5–8 s
+  (seeded) [45].
+- A source is **eliminated** once ≥ 50 % of its vertices lie in a lesion core. Edema can suppress
+  it temporarily. An isolated source keeps firing but cannot exit.
+
+**Cardioversion** resets every cell to the resting state. Sinus rhythm resumes 300 ms later.
+
+### 6.2 Scenarios
+
+Each scenario derives its ground truth from a seed (`buildScenario`). The case information shown
+to the learner (presentation, goal, criteria) contains no ground truth. Lesions from a previous
+procedure are drawn as grey tags and survive **Reset lesions**.
+
+| Scenario | Substrate | Ground truth (seeded) | Initiation |
+|---|---|---|---|
+| Sinus rhythm | healthy | sinus CL 750–950 ms | — |
+| Paroxysmal AF | paroxysmal preset (§2.3) | triggers in 1 (60 %) or 2 random PVs, 4–8 mm into the sleeve | spontaneous bursts |
+| Persistent AF | persistent preset, fibrosis × 0.9–1.2 | fibrosis pattern, S2 patch | cross-field S1–S2 |
+| Perimitral flutter | paroxysmal ionic model, CV 0.56–0.64 m/s, no fibrosis; prior wide-area rings around each ipsilateral pair (7 mm, 35 W × 20 s × 15 g) | direction | transient line block |
+| Roof-dependent flutter | as perimitral | CV | transient line block |
+| Focal AT | healthy or paroxysmal | focus at the LAA base, mitral annulus, septum, RSPV or LSPV antrum, or roof; CL 320–420 ms | automatic focus |
+| Redo PVI | paroxysmal; prior per-vein rings (5 mm) | one vein with two consecutive lesions missing (an 8–12 mm gap); trigger in that vein | spontaneous bursts |
+
+**Induction.** This is a numerical stand-in for clinical induction, so that every case starts in
+its arrhythmia.
+
+- **Line induction (macro-reentry).** A transient line of block (all its edges at zero
+  conductance) runs from the mitral annulus to the left ring (perimitral), or across the mid
+  posterior wall between the rings (roof). A stimulus beside the line launches a wave in one
+  direction. The line is released at 230 ms, once the stimulated side has recovered (APD ≈ 190
+  ms), and the wave re-enters. The first sinus beat waits until 600 ms, and is then reset by the
+  tachycardia.
+  - Perimitral flutter runs at TCL ≈ 260–290 ms.
+  - Roof-dependent flutter is a figure-of-eight around both PV isolation lines, ascending the
+    posterior wall, at TCL ≈ 330–340 ms. The descending launch does not sustain on this anatomy
+    and is not used.
+- **Cross-field S1–S2 (AF)** [47]. S1 is the sinus beat. S2 is a 15 mm patch centred ≈ 30 mm
+  (≈ 60 ms at 0.5 m/s) from the breakthrough, delivered APD90 + 5–20 ms after the patch centre
+  activates. The S2 wave can only propagate back into recovered tissue, so it breaks and forms
+  rotors. On the fibrotic substrate this produces sustained, irregular activity with a dominant
+  CS cycle length of 150–200 ms and many phase singularities.
+- **Re-induction.** If the arrhythmia stops before the learner has delivered any lesion,
+  cardioverted, or paced, it is re-induced (up to 6 times).
+
+The validation experiments behind these choices (`flutter`/`AF` scripts) showed two things:
+
+- Without prior PVI, a transient mitral-isthmus line launched reentry around a single PV sleeve.
+  With isolated veins, the intended circuits form.
+- The same mitral line (or roof line) terminates only its own circuit:
+  - A mitral-isthmus line terminates perimitral flutter but not roof flutter.
+  - A roof line terminates roof flutter but not perimitral flutter.
+
+**Automatic reference choice.** If the reference bipole records < 0.3 mV peak-to-peak 1.5 s into a
+case (for example, CS 7-8 lying over old scar), the case switches once to the CS bipole with the
+largest signal. This is what a technician would do, and it uses signals only.
+
+### 6.3 Ground truth, success criteria and the report
+
+**Conduction topology** (`topology.ts`).
+
+- An edge conducts when both its vertices are excitable and its diffusivity is non-zero.
+- The **LA body** is the set of vertices reachable from the sinus sites.
+- A PV is **isolated** when none of its excitable sleeve vertices is in the body.
+- **Barrier components:**
+  - Inexcitable vertices, vertices on openings, and excitable islands cut off from the body
+    form "barrier" vertices, which are joined along mesh edges.
+  - On a triangulated surface, a conducting path cannot cross an edge-connected chain of barrier
+    vertices. Two openings are therefore separated by a line of block exactly when they share a
+    component.
+  - **Mitral block:** the MV opening shares a component with a PV opening.
+  - **Roof block:** a left and a right PV opening share a component.
+- **Durability.** Every check is also run with edema expired ("durable"). Block that depends on
+  edema is reported as such.
+
+**Evidence of what the learner did** (`report.ts`). Lesions within 30 mm of a vein's ostium count
+as that vein's lesion set. Evidence must come after the last such lesion.
+
+- **Entrance block:** an included mapping point in the vein sleeve with bipolar < 0.1 mV.
+- **Exit block:** tip pacing from inside the sleeve with local capture and no 1:1 CS follow.
+- **Line block demonstrated:** after the last lesion, either:
+  - a pacing manoeuvre with a stimulus-to-electrogram time ≥ 100 ms to a bipole within 35 mm
+    (the wave must detour around the line), or
+  - a paced activation map with ≥ 10 points acquired during pacing [41, 42].
+- **Earliest site:** the location of the minimum interpolated LAT, compared with the true
+  breakthrough or focus.
+
+**Criteria per scenario:**
+
+- **Sinus:** coverage ≥ 80 %; earliest site within 10 mm.
+- **PAF:** durable isolation of every vein, plus entrance and exit block evidence in every vein.
+- **Persistent AF:** durable PVI; sinus rhythm at the end (cardioversion allowed).
+- **Perimitral / roof:** durable line block; sinus rhythm at the end; line block demonstrated by
+  pacing.
+- **Focal AT:** focus eliminated or isolated (durable); sinus at the end; earliest site within
+  8 mm.
+- **Redo:** durable PVI; a new lesion within 6 mm of the gap centre; entrance and exit block in the
+  reconnected vein [46].
+
+**Report contents:**
+
+- **Map quality:** points, included points, surface coverage (fraction of vertices with an
+  interpolated LAT), density per cm².
+- **Lesion set:** new and prior lesions, RF time, mean LQI, lesions below target, interlesion gaps.
+- **Block:** per-vein isolation, mitral and roof block, rhythm.
+- **Procedure:** simulated and wall time, pacing manoeuvres, cardioversions.
+- **Safety:** esophageal temperature warnings, lesions over the esophagus, lesions with mean force
+  > 40 g, lesions below the LQI target.
+- **Explanation:** what was going on.
+
+The report can be downloaded as JSON.
+
+**The mitral isthmus is thick** (2.4–2.6 mm in the thickness model, §1.5). Standard 35 W × 20 s
+lesions at 4 mm spacing leave conducting gaps between their cores; 45 W × 30 s at 3 mm closes the
+line. This mirrors the clinical difficulty of mitral isthmus block [41]. Epicardial CS ablation is
+not modelled.
+
+### 6.4 Validation
+
+`tests/pacing.test.ts`, `tests/scenarios.test.ts`, `tests/cases-pacing.test.ts` and
+`tests/cases-arrhythmia.test.ts`. The case tests run the full reaction–diffusion engine on the CPU:
+
+- **Protocols:** stimulus times for each protocol.
+- **Capture:** the threshold follows the gap law; scar does not capture; output enlarges the
+  footprint.
+- **Signal analysis:** first activation, cycle length, and the noise floor.
+- **Scenarios:**
+  - Each scenario is deterministic per seed and varies across seeds.
+  - PV triggers sit in the sleeves.
+  - **Redo:** exactly the gap vein is reconnected. One lesion does not re-isolate it; filling both
+    missing sites does.
+  - **Post-PVI cases:** the rings isolate every vein. A mitral line creates mitral block but not
+    roof block, and vice versa. A line with three missing lesions is not blocked.
+- **Evaluation:** PAF needs isolation plus entrance and exit evidence after the last lesion; safety
+  warnings are reported.
+- **Pacing (engine):**
+  - CS pacing at 5 mA captures. The CS reference follows the pacing CL (sinus is overdriven), and
+    activation spreads from CS 3-4 to CS 9-10.
+  - 0.2 mA does not capture (ground-truth capture fraction 0).
+- **Entrainment:** PPI − TCL < 30 ms on the annulus and > 60 ms in the LAA.
+- **Exit block:**
+  - Before isolation, pacing inside the LSPV captures locally and the CS follows 1:1.
+  - After an antral ring, it still captures locally, but the CS no longer follows.
+- **Endpoints:**
+  - Perimitral flutter: a mitral line (45 W × 30 s, 3 mm spacing) terminates it, with durable
+    mitral block.
+  - Roof flutter: a roof line terminates it.
+  - Focal AT: one lesion at the focus eliminates it and sinus resumes.
+  - Persistent AF: sustained and irregular for 3 s; cardioversion restores sinus.
 
 ## 7. Autonomic module and dataset export
 *(planned, M7.)*
@@ -922,6 +1155,24 @@ while 20–25 W applications of 10 s stay below it.
   phenomenological and uncalibrated. Do not read them as clinical targets.
 - **Compressed time.** The RF clock and edema recovery are compressed for teaching (§5.5).
   Late reconnection from tissue healing is represented only through edema.
+
+### Pacing and scenarios (M6)
+- **Scripted induction.** Arrhythmias start from a numerical induction (transient line block or a
+  cross-field S2), not from programmed stimulation. Burst pacing in this model rarely induces AF,
+  because wavefronts on a smooth isotropic shell organize rather than break. Learners can still
+  try burst and S1–S2 protocols.
+- **Phenomenological capture.** There is no virtual-electrode (bidomain) effect, no anodal
+  capture, no strength–duration curve beyond the √(I/I_th) scaling, and no stimulus artifact.
+- **Two catheters.** Only the CS and one roving catheter exist, so some clinical verification
+  manoeuvres are approximated. For example, roof-line verification by LAA pacing while mapping
+  the posterior wall needs a second roving catheter, so a paced activation map from the CS is
+  accepted instead.
+- **Simplified sinus node and foci.** Reset is instantaneous, with no sinus-node recovery time and
+  no overdrive suppression of automatic foci.
+- **Ground truth on a graph.** Block is decided on the vertex graph. Conduction across
+  interstitially removed edges and electrotonic effects over thin lines are not considered.
+- **Fixed anatomy.** The flutter circuits were validated on the default anatomy. On strongly
+  varied procedural anatomies, a case may need re-induction.
 
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
@@ -987,3 +1238,12 @@ while 20–25 W applications of 10 s stay below it.
 36. Arujuna A, Karim R, Caulfield D, et al. Acute pulmonary vein isolation is achieved by a combination of reversible and irreversible atrial injury after catheter ablation: evidence from magnetic resonance imaging. *Circ Arrhythm Electrophysiol* 2012;5:691–700.
 37. Good E, Oral H, Lemola K, et al. Movement of the esophagus during left atrial catheter ablation for atrial fibrillation. *J Am Coll Cardiol* 2005;46:2107–2110.
 38. Leite LR, Santos SN, Maia H, et al. Luminal esophageal temperature monitoring with a deflectable esophageal temperature probe and intracardiac echocardiography may reduce esophageal injury during atrial fibrillation ablation procedures. *Circ Arrhythm Electrophysiol* 2011;4:149–156.
+39. Jaïs P, Matsuo S, Knecht S, et al. A deductive mapping strategy for atrial tachycardia following atrial fibrillation ablation: importance of localized reentry. *J Cardiovasc Electrophysiol* 2009;20:480–491.
+40. Waldo AL. Atrial flutter: entrainment characteristics. *J Cardiovasc Electrophysiol* 1997;8:337–352.
+41. Jaïs P, Hocini M, Hsu LF, et al. Technique and results of linear ablation at the mitral isthmus in eradicating persistent atrial fibrillation. *Circulation* 2004;110:2996–3002.
+42. Hocini M, Jaïs P, Sanders P, et al. Techniques, evaluation, and consequences of linear block at the left atrial roof in paroxysmal atrial fibrillation: a prospective randomized study. *Circulation* 2005;112:3688–3696.
+43. Calkins H, Hindricks G, Cappato R, et al. 2017 HRS/EHRA/ECAS/APHRS/SOLAECE expert consensus statement on catheter and surgical ablation of atrial fibrillation. *Heart Rhythm* 2017;14:e275–e444.
+44. Strauss HC, Saroff AL, Bigger JT Jr, Giardina EG. Premature atrial stimulation as a key to the understanding of sinoatrial conduction in man: presentation of data and critical review of the literature. *Circulation* 1973;47:86–93.
+45. Haïssaguerre M, Jaïs P, Shah DC, et al. Spontaneous initiation of atrial fibrillation by ectopic beats originating in the pulmonary veins. *N Engl J Med* 1998;339:659–666.
+46. Ouyang F, Antz M, Ernst S, et al. Recovered pulmonary vein conduction as a dominant factor for recurrent atrial tachyarrhythmias after complete circular isolation of the pulmonary veins. *Circulation* 2005;111:127–135.
+47. Pertsov AM, Davidenko JM, Salomonsz R, Baxter WT, Jalife J. Spiral waves of excitation underlie reentrant activity in isolated cardiac muscle. *Circ Res* 1993;72:631–650.

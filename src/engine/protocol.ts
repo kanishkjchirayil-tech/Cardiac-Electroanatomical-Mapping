@@ -8,6 +8,9 @@ import type { ChannelDef, SignalSettings } from '../core/signals/recording';
 import type { AblationSettings } from '../core/ablation/controller';
 import type { Lesion } from '../core/ablation/lesion';
 import type { RfReadout } from '../core/ablation/rf';
+import type { PacingProtocol, PacingRequest, PacingSite } from '../core/pacing/protocols';
+import type { ScenarioId, ScenarioPublic, ScenarioTruth } from '../core/scenarios/scenarios';
+import type { PvName } from '../core/mesh/regions';
 
 export type SimMode = 'eikonal' | 'rd';
 export type BackendPref = 'auto' | 'cpu';
@@ -24,6 +27,8 @@ export interface SimConfig {
   /** Sinus cycle length, ms (0 = sinus off). */
   sinusCl: number;
   backend: BackendPref;
+  /** Clinical scenario (seeded ground truth); null = free simulation with the settings above. */
+  scenario: { id: ScenarioId; seed: number; /** Changes on every (re)start so the same case can be restarted. */ run?: number } | null;
 }
 
 export const DEFAULT_SIM_CONFIG: SimConfig = {
@@ -35,6 +40,7 @@ export const DEFAULT_SIM_CONFIG: SimConfig = {
   fibrosisPattern: 'patchy',
   sinusCl: 800,
   backend: 'auto',
+  scenario: null,
 };
 
 export interface SimInfo {
@@ -72,6 +78,62 @@ export interface RigInfo {
 export interface RfFrame extends RfReadout {
   lesionId: number;
   inEsophagealZone: boolean;
+}
+
+/** One electrogram channel's stimulus-to-local-activation interval during pacing. */
+export interface PacingInterval {
+  channel: string;
+  /** Median over the recent paced beats, ms; null if no local activation was seen. */
+  ms: number | null;
+  /** Distance from the pacing cathode to the bipole centre, mm. */
+  distance: number;
+}
+
+/** Pacing state and signal-derived measurements (recorded electrograms only). */
+export interface PacingStatus {
+  active: boolean;
+  site: PacingSite;
+  output: number;
+  protocol: PacingProtocol;
+  t0: number;
+  stims: number;
+  /** Local capture seen on the neighbouring bipole after recent stimuli. */
+  localCapture: boolean | null;
+  /** Roving pacing: every recent stimulus was followed by CS activation (1:1 conduction). */
+  csFollows: boolean | null;
+  intervals: PacingInterval[];
+  entrain: { tcl: number; ppi: number; diff: number } | null;
+  rovingVertex: number;
+  rovingRegion: number;
+}
+
+/** A finished pacing manoeuvre, kept for the case report. */
+export interface PacingLogEntry extends PacingStatus {
+  end: number;
+  /** Ground truth: fraction of stimuli that captured tissue (report and teacher only). */
+  captureTruth: number;
+}
+
+/** Hidden-state evaluation for the end-of-case report (MODEL.md §6.3). */
+export interface CaseGroundTruth {
+  scenario: ScenarioPublic | null;
+  truth: ScenarioTruth | null;
+  seed: number;
+  simTime: number;
+  wallMs: number;
+  pv: Array<{ pv: PvName; isolated: boolean; durable: boolean; connected: number }>;
+  mitralBlock: { now: boolean; durable: boolean };
+  roofBlock: { now: boolean; durable: boolean };
+  sources: Array<{ name: string; eliminated: boolean; isolated: boolean }>;
+  gapClosed: boolean | null;
+  rhythm: 'sinus' | 'not-sinus';
+  inductions: number;
+  cardioversions: number;
+  pacingLog: PacingLogEntry[];
+  lesions: { user: number; prior: number; rfSeconds: number; meanLqi: number; belowTarget: number };
+  safety: { esophagealWarnings: number; maxEsophagealTemp: number; highForceLesions: number; lesionsInEsophagealZone: number };
+  /** Position of the true earliest site (sinus breakthrough or focus), for map checks. */
+  earliest: number[] | null;
 }
 
 /** Roving catheter pose and readouts, sent with frames. */
@@ -136,15 +198,23 @@ export type ToWorker =
   | { type: 'ablationSettings'; settings: AblationSettings }
   | { type: 'rfStart'; instant: boolean }
   | { type: 'rfStop' }
-  | { type: 'resetLesions' };
+  | { type: 'resetLesions' }
+  | { type: 'pace'; request: PacingRequest }
+  | { type: 'paceStop' }
+  | { type: 'cardiovert' }
+  | { type: 'requestReport' };
 
 export type FromWorker =
   | { type: 'status'; message: string }
-  | { type: 'ready'; info: SimInfo; config: SimConfig; rig: RigInfo }
-  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null; rf: RfFrame | null }
+  | { type: 'ready'; info: SimInfo; config: SimConfig; rig: RigInfo; scenario: ScenarioPublic | null }
+  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null; rf: RfFrame | null; stims: number[] }
   | { type: 'activation'; t: number; last: Float32Array; beatStart: number; fibrotic: Uint8Array; lesion: Uint8Array }
   | { type: 'lab'; preset: PresetId; ionic: IonicModelId; D0: number; cv: number; apd90: number; restitution: RestitutionResult }
   | { type: 'beat'; beat: BeatWindow }
   /** The full lesion list (after any change); `kind` is the ground-truth lesion raster (teacher view). */
   | { type: 'lesions'; lesions: Lesion[]; kind: Uint8Array; esophagealZone: Uint8Array }
+  | { type: 'pacing'; status: PacingStatus | null }
+  | { type: 'report'; report: CaseGroundTruth }
+  /** The engine changed the timing reference (automatic choice at case start). */
+  | { type: 'reference'; name: string }
   | { type: 'error'; message: string };

@@ -53,6 +53,9 @@ export function lesionSize(energy: number, power: number, p = DEFAULT_LESION_MOD
   return { depth, diameter };
 }
 
+/** LQI at which the predicted lesion is just transmural. */
+export const LESION_TARGET_LQI = 10;
+
 export const lesionQuality = (depth: number, wallThickness: number): number => (10 * depth) / Math.max(0.3, wallThickness);
 
 /** A delivered RF lesion. */
@@ -82,6 +85,8 @@ export interface Lesion {
   edemaUntil: number;
   /** Still being delivered. */
   active: boolean;
+  /** From a previous procedure (scenario setup), not delivered in this case. */
+  prior?: boolean;
 }
 
 export interface LesionFields {

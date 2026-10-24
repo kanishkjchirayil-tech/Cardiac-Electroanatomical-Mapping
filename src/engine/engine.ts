@@ -14,10 +14,14 @@ import { BeatExtractor } from '../core/signals/beats';
 import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
 import { Region } from '../core/mesh/regions';
+import { getV } from '../core/math/vec3';
 import type { EgmSamples } from '../core/ep/backend';
 import { AblationController, DEFAULT_ABLATION, applyLesionsToSubstrate, type AblationSettings } from '../core/ablation/controller';
 import { buildEsophagus, type EsophagusModel } from '../core/ablation/esophagus';
 import type { RfFrame } from './protocol';
+import { buildScenario, type ScenarioSetup } from '../core/scenarios/scenarios';
+import type { PacingRequest } from '../core/pacing/protocols';
+import { CaseController, caseGroundTruth, type CaseHost } from './case';
 
 /**
  * Simulation engine hosted in a worker. Owns the tissue, the solver backend (WebGPU with CPU
@@ -70,6 +74,15 @@ export class SimEngine {
   private lesionSource: Float32Array | null = null;
   private lesionKind: Uint8Array | null = null;
   private rfVertex = -1;
+  // Scenario and case runtime (MODEL.md §6).
+  private scenario: ScenarioSetup | null = null;
+  private scenarioKey = '';
+  private newCase = true;
+  private caseCtl: CaseController | null = null;
+  private caseWall0 = performance.now();
+  private transientBlock: Uint32Array | null = null;
+  private probeVersion = -1;
+  private lastFrameT = 0;
 
   constructor(private readonly post: (msg: FromWorker, transfer?: Transferable[]) => void) {}
 
@@ -103,14 +116,36 @@ export class SimEngine {
     const gen = ++this.generation;
     const t0 = performance.now();
     const c = this.config;
-    const preset = PRESETS[c.preset];
-    this.ionic = c.ionic === 'ms' ? preset.ionic : { id: c.ionic };
+    const key = c.scenario ? `${c.scenario.id}:${c.scenario.seed}:${c.scenario.run ?? 0}` : '';
+    if (key !== this.scenarioKey) {
+      this.scenarioKey = key;
+      this.post({ type: 'status', message: 'Setting up the case…' });
+      this.scenario = c.scenario ? buildScenario(this.mesh, c.scenario.id, c.scenario.seed) : null;
+      this.newCase = true;
+      if (this.scenario) c.sinusCl = this.scenario.sinusCl;
+    }
+    const sc = this.scenario;
+    if (sc?.info.requiresRd) c.mode = 'rd';
+    const preset = sc?.preset ?? PRESETS[c.preset];
+    this.ionic = sc || c.ionic === 'ms' ? preset.ionic : { id: c.ionic };
     const model = createIonicModel(this.ionic);
     this.post({ type: 'status', message: 'Building tissue…' });
-    this.tissue = buildTissue(this.mesh, { ...preset, fibrosis: { ...preset.fibrosis, pattern: c.fibrosisPattern } }, c.seed, c.fibrosisScale);
+    this.tissue = sc
+      ? buildTissue(this.mesh, preset, sc.seed, sc.fibrosisScale)
+      : buildTissue(this.mesh, { ...preset, fibrosis: { ...preset.fibrosis, pattern: c.fibrosisPattern } }, c.seed, c.fibrosisScale);
+    for (const z of sc?.slowZones ?? []) {
+      const P = this.mesh.positions, cond = this.tissue.substrate.conductivity;
+      for (let i = 0; i < cond.length; i++) if (Math.hypot(P[3 * i]! - z.centre[0], P[3 * i + 1]! - z.centre[1], P[3 * i + 2]! - z.centre[2]) < z.radius) cond[i] = z.conductivity;
+    }
+    this.transientBlock = null;
+    if (this.newCase && this.ablation) this.ablation = null;
     if (!this.ablation) {
       this.esophagus = buildEsophagus(this.mesh, c.seed);
       this.ablation = new AblationController(this.mesh, this.esophagus.zone);
+      for (const pl of sc?.priorLesions ?? []) {
+        const L = this.ablation.deliver(pl.vertex, [...getV(this.mesh.positions, pl.vertex)] as [number, number, number], { ...DEFAULT_ABLATION, power: pl.power, duration: pl.duration, edema: false }, pl.force, 0);
+        L.prior = true;
+      }
     } else {
       // Lesions are tissue: they survive a rebuild; the clock restarts at 0.
       this.ablation.stop(oldNow);
@@ -120,6 +155,9 @@ export class SimEngine {
     this.post({ type: 'status', message: 'Calibrating conduction velocity…' });
     const dt = model.recommendedDt;
     this.cal = await calibrateDiffusivity(this.ionic, preset.targetCv, { h: this.tissue.geom.meanEdge, dt });
+    if (this.newCase) this.caseWall0 = performance.now();
+    this.newCase = false;
+    this.caseCtl = null;
     this.sites = sinusSites(this.mesh);
     this.template = makeApTemplate(model);
     this.backend?.dispose();
@@ -153,12 +191,21 @@ export class SimEngine {
       }
       this.backend ??= new CpuBackend(init);
       this.sim = new Simulation(this.backend, dt);
-      this.sites.forEach((s) => this.sim!.schedule.addSite({ name: s.name, vertices: s.vertices, amplitude: 0.5, duration: 2 }));
+      const sched = this.sim.schedule;
+      const sinusIdx = this.sites.map((s) => sched.addSite({ name: s.name, vertices: s.vertices, amplitude: 0.5, duration: 2 }));
+      const paceIdx = sched.addSite({ name: 'Pacing', vertices: new Uint32Array(0), amplitude: 0, duration: 2 });
+      const srcIdx = (sc?.sources ?? []).map((src) => sched.addSite({ name: src.name, vertices: src.vertices, amplitude: 0.6, duration: 2 }));
+      const indIdx = sc?.induction.length ? sched.addSite({ name: 'Induction', vertices: new Uint32Array(0), amplitude: 0.5, duration: 2 }) : -1;
       this.sim.markSitesChanged();
-      this.applySinus();
+      this.siteIndex = { sinus: sinusIdx, pace: paceIdx, sources: srcIdx, induction: indIdx };
     }
     if (gen !== this.generation) return;
     this.buildRig();
+    if (this.sim) {
+      this.caseCtl = new CaseController(this.caseHost(), sc, c.sinusCl, this.siteIndex);
+      this.uploadLeadFields();
+    }
+    this.post({ type: 'pacing', status: null });
     const stats = sub.stats();
     const info: SimInfo = {
       backend: c.mode === 'eikonal' ? 'eikonal' : this.backend!.kind,
@@ -175,7 +222,7 @@ export class SimEngine {
       buildMs: performance.now() - t0,
       eikonalMs,
     };
-    this.post({ type: 'ready', info, config: { ...c }, rig: this.rigInfo() });
+    this.post({ type: 'ready', info, config: { ...c }, rig: this.rigInfo(), scenario: sc?.info ?? null });
     this.postLesions();
     await this.postFrame(true);
   }
@@ -201,7 +248,10 @@ export class SimEngine {
   }
 
   private uploadLeadFields(): void {
-    if (this.sim && this.rig) this.sim.backend.setLeadFields(this.rig.rows(), this.sampleEvery());
+    if (!this.sim || !this.rig) return;
+    const probes = this.caseCtl?.probeRows() ?? [];
+    this.probeVersion = this.caseCtl?.probes.version ?? -1;
+    this.sim.backend.setLeadFields([...this.rig.rows(), ...probes], this.sampleEvery());
   }
 
   private channelIndex(name: string): number {
@@ -368,6 +418,7 @@ export class SimEngine {
     if (!samples || !this.rig || !samples.times.length) return;
     const p = this.rig.process(samples);
     if (!p.n) return;
+    this.caseCtl?.onSignals(p, this.now());
     this.egmChunks.push(p);
     this.extractBeats(p);
     // Bound memory if nobody drains (e.g. frames throttled): keep ≤ 10 s.
@@ -403,10 +454,7 @@ export class SimEngine {
   }
 
   private applySinus(): void {
-    if (!this.sim) return;
-    const cl = this.config.sinusCl;
-    const start = this.sim.t + 1;
-    this.sim.schedule.trains = cl > 0 ? this.sites.map((s, k) => ({ site: k, start: start + s.delay, period: cl, count: Infinity })) : [];
+    if (this.sim) this.caseCtl?.setSinusCl(this.config.sinusCl, this.sim.t);
   }
 
   play(): void {
@@ -511,8 +559,14 @@ export class SimEngine {
       const piece = Math.min(end, this.rig ? this.nextMotionT : end) - now;
       this.stepAblation(now, piece);
       if (this.sim) {
+        const cc = this.caseCtl;
+        cc?.beforePiece(now, now + Math.max(piece, this.dt()));
+        if (cc && cc.probes.version !== this.probeVersion) this.uploadLeadFields();
         await this.sim.advance(Math.max(piece, this.dt()));
-        this.collect(this.sim.backend.drainSamples());
+        const raw = this.sim.backend.drainSamples();
+        const nE = this.rig?.electrodes.length ?? raw.rows;
+        if (cc && raw.rows > nE) cc.onProbeSamples(raw, nE);
+        this.collect(stripRows(raw, nE));
       } else {
         this.collect(this.eikonalSamples(now, now + piece));
         this.eikT = now + piece;
@@ -534,7 +588,9 @@ export class SimEngine {
     const egm = this.drainEgm();
     const roving = this.rovingFrame();
     const rf = this.rfFrame();
-    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving, rf }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
+    const stims = this.caseCtl?.stimsIn(this.lastFrameT, this.now()) ?? [];
+    this.lastFrameT = this.now();
+    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving, rf, stims }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
   }
 
   /** Feed processed samples to the beat extractor and post completed reference beats. */
@@ -671,8 +727,10 @@ export class SimEngine {
     this.rasterizeLesions(now);
     const sub = this.tissue.substrate;
     if (this.sim) {
-      this.sim.backend.setEdgeDiffusivity(sub.edgeDiffusivity(this.cal.D));
+      this.sim.backend.setEdgeDiffusivity(this.edgeD());
       this.sim.backend.setVertexParams(sub.apdScale, sub.excitable());
+      this.caseCtl?.updateSources();
+      this.caseCtl?.updateFootprint();
     } else {
       this.eikonalT = this.computeEikonal();
     }
@@ -755,6 +813,94 @@ export class SimEngine {
     return { ...r, lesionId: L.id, inEsophagealZone: this.esophagus?.zone[L.vertex] === 1 };
   }
 
+  // ---- Case: pacing, cardioversion, report --------------------------------------------------------
+
+  private siteIndex = { sinus: [] as number[], pace: -1, sources: [] as number[], induction: -1 };
+
+  /** Edge diffusivities of the current substrate, with any transient induction block applied. */
+  private edgeD(): Float32Array {
+    const e = this.tissue!.substrate.edgeDiffusivity(this.cal!.D);
+    const b = this.transientBlock;
+    if (b) {
+      const set = new Uint8Array(this.tissue!.geom.nV);
+      for (const v of b) set[v] = 1;
+      const g = this.tissue!.geom;
+      for (let k = 0; k < e.length; k++) if (set[g.edgeA[k]!] || set[g.edgeB[k]!]) e[k] = 0;
+    }
+    return e;
+  }
+
+  private setTransientBlock(v: Uint32Array | null): void {
+    this.transientBlock = v;
+    this.sim?.backend.setEdgeDiffusivity(this.edgeD());
+  }
+
+  private caseHost(): CaseHost {
+    const self = this;
+    return {
+      get mesh() { return self.mesh!; },
+      get sim() { return self.sim!; },
+      get rig() { return self.rig!; },
+      get substrate() { return self.tissue!.substrate; },
+      get geom() { return self.tissue!.geom; },
+      get D0() { return self.cal!.D; },
+      get apd90() { return self.cal!.apd90; },
+      get sinusSites() { return self.sites; },
+      get ablation() { return self.ablation!; },
+      get esophagealZone() { return self.esophagus!.zone; },
+      lesionSource: () => self.lesionSource,
+      setTransientBlock: (v) => self.setTransientBlock(v),
+      refChannel: () => self.beats?.refChannel ?? 0,
+      setReference: (name) => {
+        self.refName = name;
+        self.beats?.setReference(self.channelIndex(name));
+        self.post({ type: 'reference', name });
+      },
+      post: (m) => self.post(m),
+    };
+  }
+
+  pace(request: PacingRequest): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.caseCtl || !this.sim) throw new Error('Pacing needs the reaction–diffusion engine (Simulation panel).');
+      this.caseCtl.startPacing(request, this.sim.t);
+    });
+  }
+
+  paceStop(): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.sim) this.caseCtl?.stopPacing(this.sim.t);
+    });
+  }
+
+  /** DC cardioversion: reset every cell to rest. */
+  cardiovert(): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.sim || !this.caseCtl) return;
+      const model = createIonicModel(this.ionic);
+      const [v0, g0, g1] = model.restState();
+      const n = this.sim.backend.nV;
+      await this.caseCtl.cardiovert(this.sim.t, () => this.sim!.backend.setState(new Float32Array(n).fill(v0), new Float32Array(n).fill(g0), new Float32Array(n).fill(g1)));
+      await this.postFrame(true);
+    });
+  }
+
+  requestReport(): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.tissue || !this.ablation || !this.mesh || !this.cal || !this.esophagus) return;
+      const now = this.now();
+      const report = this.caseCtl
+        ? this.caseCtl.report(now, this.config.sinusCl)
+        : caseGroundTruth(
+            { mesh: this.mesh, substrate: this.tissue.substrate, geom: this.tissue.geom, D0: this.cal.D, sinusSites: this.sites, ablation: this.ablation, esophagealZone: this.esophagus.zone },
+            this.scenario, now, performance.now() - this.caseWall0,
+            { rhythm: 'sinus', inductions: 0, cardioversions: 0, pacingLog: [], sources: this.scenario?.sources ?? [] },
+          );
+      report.wallMs = performance.now() - this.caseWall0;
+      this.post({ type: 'report', report });
+    });
+  }
+
   runLab(): Promise<void> {
     return this.enqueue(async () => {
       const preset = PRESETS[this.config.preset];
@@ -787,4 +933,13 @@ function defaultRovingVertex(mesh: SurfaceMesh): number {
     if (d < bd) { bd = d; best = i; }
   });
   return best;
+}
+
+/** Drop solver rows beyond the rig's electrodes (probe columns). */
+function stripRows(s: EgmSamples, nE: number): EgmSamples {
+  if (s.rows <= nE) return s;
+  const n = s.times.length;
+  const data = new Float32Array(n * nE);
+  for (let k = 0; k < n; k++) data.set(s.data.subarray(k * s.rows, k * s.rows + nE), k * nE);
+  return { times: s.times, data, rows: nE };
 }
