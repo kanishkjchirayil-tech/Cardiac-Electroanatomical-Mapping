@@ -5,6 +5,7 @@ import * as S from './state';
 import { EgmStore } from './egm-store';
 import type { RovingConfig } from '../core/catheter/roving';
 import type { SignalSettings } from '../core/signals/recording';
+import type { AblationSettings } from '../core/ablation/controller';
 import { EGM_FS } from '../core/signals/rig';
 import * as M from './mapping-state';
 
@@ -43,6 +44,7 @@ function ensureWorker(): Worker {
         S.simSpeed.value = m.speed;
         S.simRunning.value = m.running;
         S.vmFrameId.value++;
+        if (m.rf || S.rf.peek()) S.rf.value = m.rf;
         if (m.egm) {
           egmStore.append(m.egm);
           S.egmVersion.value++;
@@ -54,7 +56,14 @@ function ensureWorker(): Worker {
         }
         break;
       case 'activation':
-        S.gtActivation.value = { last: m.last, beatStart: m.beatStart, fibrotic: m.fibrotic, t: m.t };
+        S.gtActivation.value = { last: m.last, beatStart: m.beatStart, fibrotic: m.fibrotic, lesion: m.lesion, t: m.t };
+        break;
+      case 'lesions':
+        S.lesions.value = m.lesions;
+        S.lesionKind.value = m.kind;
+        S.esophagealZone.value = m.esophagealZone;
+        // The tissue changed: refresh the teacher's ground-truth view.
+        if (S.teacherView.peek() && S.teacherOverlay.peek() !== 'vm') requestActivation();
         break;
       case 'beat':
         M.onBeat(m.beat);
@@ -85,6 +94,9 @@ export function initSimulation(mesh: SurfaceMesh): void {
   send({ type: 'signals', settings: S.signalSettings.peek() });
   send({ type: 'motion', enabled: S.motionEnabled.peek() });
   send({ type: 'setReference', name: S.referenceChannel.peek() });
+  send({ type: 'ablationSettings', settings: S.ablationSettings.peek() });
+  S.lesions.value = [];
+  S.rf.value = null;
   M.initMapping(mesh);
 }
 
@@ -132,3 +144,11 @@ export const setReference = (name: string) => {
   S.referenceChannel.value = name;
   send({ type: 'setReference', name });
 };
+
+export const setAblationSettings = (patch: Partial<AblationSettings>) => {
+  S.ablationSettings.value = { ...S.ablationSettings.peek(), ...patch };
+  send({ type: 'ablationSettings', settings: S.ablationSettings.peek() });
+};
+export const rfStart = () => send({ type: 'rfStart', instant: S.rfInstant.peek() });
+export const rfStop = () => send({ type: 'rfStop' });
+export const resetLesions = () => send({ type: 'resetLesions' });

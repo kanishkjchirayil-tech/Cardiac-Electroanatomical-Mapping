@@ -22,5 +22,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case 'signals': void engine.setSignals(m.settings); break;
     case 'motion': void engine.setMotion(m.enabled); break;
     case 'setReference': void engine.setReference(m.name); break;
+    case 'ablationSettings': engine.setAblationSettings(m.settings); break;
+    case 'rfStart': void engine.rfStart(m.instant); break;
+    case 'rfStop': void engine.rfStop(); break;
+    case 'resetLesions': void engine.resetLesions(); break;
   }
 };

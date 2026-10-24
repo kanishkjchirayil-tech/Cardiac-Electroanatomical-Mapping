@@ -2,7 +2,9 @@ import { signal } from '@preact/signals';
 import type { SurfaceMesh } from '../core/mesh/types';
 import type { MeshQuality } from '../core/mesh/quality';
 import type { ClipState, HoverInfo } from '../render/viewer';
-import { DEFAULT_SIM_CONFIG, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_SIM_CONFIG, type RfFrame, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
+import { DEFAULT_ABLATION, type AblationSettings } from '../core/ablation/controller';
+import type { Lesion } from '../core/ablation/lesion';
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
 import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
 import type { RestitutionResult } from '../core/ep/calibrate';
@@ -46,7 +48,7 @@ export const teacherView = signal(false);
 export const teacherOverlay = signal<TeacherOverlay>('vm');
 /** Bumped whenever a new Vm frame arrives (the array itself is kept outside the signal graph). */
 export const vmFrameId = signal(0);
-export const gtActivation = signal<{ last: Float32Array; beatStart: number; fibrotic: Uint8Array; t: number } | null>(null);
+export const gtActivation = signal<{ last: Float32Array; beatStart: number; fibrotic: Uint8Array; lesion: Uint8Array; t: number } | null>(null);
 export const labResult = signal<{ D0: number; cv: number; apd90: number; restitution: RestitutionResult; label: string } | null>(null);
 export const labRunning = signal(false);
 
@@ -60,3 +62,15 @@ export const motionEnabled = signal(true);
 export const egmVersion = signal(0);
 /** CS bipole used as the timing reference (EGM panel, beat detection and mapping). */
 export const referenceChannel = signal('CS 7-8');
+
+// ---- Ablation ----
+export const ablationSettings = signal<AblationSettings>({ ...DEFAULT_ABLATION });
+export const lesions = signal<Lesion[]>([]);
+/** Ground-truth lesion raster (teacher substrate overlay) and the esophageal warning zone. */
+export const lesionKind = signal<Uint8Array | null>(null);
+export const esophagealZone = signal<Uint8Array | null>(null);
+export const rf = signal<RfFrame | null>(null);
+export const showLesionTags = signal(true);
+export const showEsophagus = signal(true);
+/** Deliver each application at once instead of on the (accelerated) RF clock. */
+export const rfInstant = signal(false);

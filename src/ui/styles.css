@@ -211,3 +211,13 @@ fieldset.band legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
   .disclaimer { font-size: 10px; white-space: normal; text-align: center; }
   .legend { top: auto; bottom: 30px; max-height: 45%; min-width: 0; font-size: 12px; }
 }
+
+/* Ablation */
+button.primary.danger { background: var(--danger); border-color: var(--danger); color: #2b0703; }
+.warn-text { color: var(--warn); }
+.rf-live { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.rf-live.alarm { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger) inset; }
+.rf-live.alarm .warn-text { color: var(--danger); font-weight: 600; }
+.rf-progress { height: 4px; background: var(--panel-2); border-radius: 2px; margin-bottom: 6px; overflow: hidden; }
+.rf-progress > div { height: 100%; background: var(--danger); }
+.point-list .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; }

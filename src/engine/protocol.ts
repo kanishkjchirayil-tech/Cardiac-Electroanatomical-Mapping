@@ -5,6 +5,9 @@ import type { FibrosisPattern } from '../core/ep/substrate';
 import type { RestitutionResult } from '../core/ep/calibrate';
 import type { CatheterType, RovingConfig } from '../core/catheter/roving';
 import type { ChannelDef, SignalSettings } from '../core/signals/recording';
+import type { AblationSettings } from '../core/ablation/controller';
+import type { Lesion } from '../core/ablation/lesion';
+import type { RfReadout } from '../core/ablation/rf';
 
 export type SimMode = 'eikonal' | 'rd';
 export type BackendPref = 'auto' | 'cpu';
@@ -61,6 +64,14 @@ export interface RigInfo {
   csElectrodes: number[];
   /** Transseptal entry point used to draw the roving catheter shaft. */
   transseptal: number[];
+  /** Esophagus centreline (flat xyz) and radius, mm, for display. */
+  esophagus: { path: number[]; radius: number };
+}
+
+/** Live RF application state, sent with frames while RF is on. */
+export interface RfFrame extends RfReadout {
+  lesionId: number;
+  inEsophagealZone: boolean;
 }
 
 /** Roving catheter pose and readouts, sent with frames. */
@@ -121,13 +132,19 @@ export type ToWorker =
   | { type: 'rovingConfig'; config: Partial<RovingConfig> }
   | { type: 'signals'; settings: SignalSettings }
   | { type: 'motion'; enabled: boolean }
-  | { type: 'setReference'; name: string };
+  | { type: 'setReference'; name: string }
+  | { type: 'ablationSettings'; settings: AblationSettings }
+  | { type: 'rfStart'; instant: boolean }
+  | { type: 'rfStop' }
+  | { type: 'resetLesions' };
 
 export type FromWorker =
   | { type: 'status'; message: string }
   | { type: 'ready'; info: SimInfo; config: SimConfig; rig: RigInfo }
-  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null }
-  | { type: 'activation'; t: number; last: Float32Array; beatStart: number; fibrotic: Uint8Array }
+  | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null; rf: RfFrame | null }
+  | { type: 'activation'; t: number; last: Float32Array; beatStart: number; fibrotic: Uint8Array; lesion: Uint8Array }
   | { type: 'lab'; preset: PresetId; ionic: IonicModelId; D0: number; cv: number; apd90: number; restitution: RestitutionResult }
   | { type: 'beat'; beat: BeatWindow }
+  /** The full lesion list (after any change); `kind` is the ground-truth lesion raster (teacher view). */
+  | { type: 'lesions'; lesions: Lesion[]; kind: Uint8Array; esophagealZone: Uint8Array }
   | { type: 'error'; message: string };

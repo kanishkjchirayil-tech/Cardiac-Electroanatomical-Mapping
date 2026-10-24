@@ -17,7 +17,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | **M2** — Monodomain / eikonal solver, calibration, sinus rhythm | ✅ done |
 | **M3** — Catheters, EGM synthesis, EGM panel | ✅ done |
 | **M4** — Acquisition, annotation, LAT and voltage maps | ✅ done |
-| M5 — Ablation and lesion tags | planned |
+| **M5** — Ablation and lesion tags | ✅ done |
 | M6 — Pacing, entrainment, scenarios, case report | planned |
 | M7 — Autonomic module, dataset export, batch mode | planned |
 
@@ -28,7 +28,7 @@ You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU w
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 3 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy)
+npm test           # Vitest suite (≈ 3 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy, ablation block vs gap)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
@@ -67,7 +67,8 @@ The sidebar has these panels:
   - **Run / Pause / +10 ms / Reset**, and the speed (0.1× to 1×, or Max). The clock shows simulated
     time and the measured speed as a multiple of real time.
   - **Teacher view** is off by default. It reveals hidden ground truth: live voltage, the true
-    activation map of the last beat, and fibrotic nodes. Mapping in M4 never uses it.
+    activation map of the last beat, and the substrate (fibrotic nodes, lesion cores and borders, the
+    esophageal zone). Mapping never uses it.
   - **Tissue lab** measures plane-wave CV, APD90, ERP, and S1–S2 restitution curves for the current
     tissue.
 - **Roving catheter**
@@ -92,6 +93,24 @@ The sidebar has these panels:
   - Points list: delete, undo, clear. The **inspector** shows the stored reference, bipolar and
     unipolar EGMs; click on them to re-annotate LAT. It also has *Auto LAT*, exclude, and tags.
   - The **HD grid** catheter (Roving catheter panel) acquires up to 16 points per beat.
+- **Ablation**
+  - Settings: **power** (W) and **duration** (s). Contact force comes from the catheter panel.
+  - **RF ON / OFF** delivers at the ablation catheter tip. RF advances on an accelerated
+    **RF clock** (1–20× simulated time, default 10×) while the simulation runs. **Instant**
+    delivers the whole application at once, even when paused. Moving the catheter stops RF.
+  - Live readouts: elapsed time, force, impedance and its drop, force–time integral, effective
+    energy, predicted depth vs local wall thickness, and the **lesion quality index** (LQI, target 10 =
+    predicted transmural). Over the esophagus, an estimated esophageal temperature with a warning at
+    39 °C.
+  - **Edema** (optional) makes fresh lesions temporarily larger. Edema recovers after a set
+    simulated time, so acute block can later reconnect.
+  - Lesion list: LQI, depth/wall, power·time, FTI, and the distance to the previous lesion. Gaps
+    above the threshold (default 6 mm) are flagged and drawn as red lines. **Reset lesions**
+    restores the tissue.
+  - 3D view: lesion tags coloured by LQI (green ≥ 10, amber 8–10, red < 8), and the esophagus as a
+    translucent tube behind the posterior wall.
+  - Lesions change the tissue itself. Transmural cores stop conduction, partial lesions only slow
+    it, and electrograms over ablated tissue shrink. Map before and after to check for block.
 - **Signals**
   - Mains interference (50 or 60 Hz, or off) and a notch filter.
   - Noise level.
@@ -160,6 +179,7 @@ src/
     catheter/      CS decapolar and roving catheter geometry, contact and motion models, surface walking
     signals/       lead fields, recording chain (noise, referencing, filters), ECG, beat windows, detection
     mapping/       annotation, mapping session (filters, undo), geodesic interpolation — sees signals only
+    ablation/      RF application, empirical lesion model and raster, edema, esophagus, lesion-set helpers
   engine/          simulation engine hosted in a worker (clock, sinus pacing, backend selection)
   render/          three.js viewer, colormaps, standard views (framework-free)
   workers/         mesh generation and simulation workers

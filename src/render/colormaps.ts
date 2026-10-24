@@ -116,3 +116,12 @@ export function voltageMapColor(v: number, scar: number, normal: number): RGB {
   if (v < scar) return SCAR;
   return latColor((v - scar) / Math.max(1e-6, normal - scar));
 }
+
+/** Lesion tags by quality index (10 ⇔ predicted transmural): green ≥ 10, amber 8–10, red < 8. */
+export const LESION_GOOD: RGB = [0.2, 0.75, 0.35];
+export const LESION_FAIR: RGB = [0.95, 0.68, 0.15];
+export const LESION_POOR: RGB = [0.88, 0.2, 0.2];
+export const lesionTagColor = (lqi: number, target = 10): RGB => (lqi >= target ? LESION_GOOD : lqi >= 0.8 * target ? LESION_FAIR : LESION_POOR);
+/** Teacher view: transmural lesion core and border / partial-thickness lesion. */
+export const LESION_CORE: RGB = [0.42, 0.1, 0.14];
+export const LESION_BORDER: RGB = [0.86, 0.55, 0.6];

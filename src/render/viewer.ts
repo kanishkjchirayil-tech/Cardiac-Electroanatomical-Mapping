@@ -453,6 +453,66 @@ export class Viewer {
     return hit && hit.instanceId !== undefined ? this.pointIds[hit.instanceId] ?? null : null;
   }
 
+  private lesionMesh: THREE.InstancedMesh | null = null;
+  private gapLines: THREE.LineSegments | null = null;
+  private esophagus: THREE.Mesh | null = null;
+
+  /**
+   * Lesion tags (spheres coloured by lesion quality; the lesion being delivered is drawn larger)
+   * and interlesion gap segments (flat endpoints) drawn in red.
+   */
+  setLesionTags(tags: Array<{ position: number[]; color: [number, number, number]; active: boolean }>, gaps: Float32Array | null): void {
+    if (this.lesionMesh) {
+      this.scene.remove(this.lesionMesh);
+      this.lesionMesh.dispose();
+      this.lesionMesh = null;
+    }
+    if (this.gapLines) {
+      this.scene.remove(this.gapLines);
+      this.gapLines.geometry.dispose();
+      this.gapLines = null;
+    }
+    if (tags.length) {
+      const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1.25, 14, 10), new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.05 }), tags.length);
+      const m = new THREE.Matrix4(), c = new THREE.Color();
+      tags.forEach((t, i) => {
+        const k = t.active ? 1.5 : 1;
+        m.makeScale(k, k, k).setPosition(t.position[0]!, t.position[1]!, t.position[2]!);
+        mesh.setMatrixAt(i, m);
+        mesh.setColorAt(i, c.setRGB(...t.color, THREE.SRGBColorSpace));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this.lesionMesh = mesh;
+      this.scene.add(mesh);
+    }
+    if (gaps && gaps.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(gaps, 3));
+      this.gapLines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xff3b30, depthTest: false, transparent: true }));
+      this.gapLines.renderOrder = 5;
+      this.scene.add(this.gapLines);
+    }
+    this.dirty = true;
+  }
+
+  /** Esophagus as a translucent tube along a centreline (flat xyz), or hidden. */
+  setEsophagus(path: number[] | null, radius = 6): void {
+    if (this.esophagus) {
+      this.scene.remove(this.esophagus);
+      this.esophagus.geometry.dispose();
+      this.esophagus = null;
+    }
+    if (path && path.length >= 6) {
+      const pts = Array.from({ length: path.length / 3 }, (_, i) => new THREE.Vector3(path[3 * i]!, path[3 * i + 1]!, path[3 * i + 2]!));
+      const g = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 32, radius, 16, false);
+      this.esophagus = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xd98c6a, transparent: true, opacity: 0.35, depthWrite: false, roughness: 0.8 }));
+      this.esophagus.renderOrder = 2;
+      this.scene.add(this.esophagus);
+    }
+    this.dirty = true;
+  }
+
   /** Conduction-velocity arrows (flat segment endpoints), or null to hide. */
   setCvArrows(segments: Float32Array | null): void {
     if (this.cvLines) {

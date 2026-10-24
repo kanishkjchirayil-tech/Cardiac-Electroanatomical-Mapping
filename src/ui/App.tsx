@@ -2,7 +2,9 @@ import { useEffect, useRef } from 'preact/hooks';
 import { useSignalEffect, untracked } from '@preact/signals';
 import { Viewer } from '../render/viewer';
 import { standardViews, type ViewName } from '../render/views';
-import { regionColors, scalarColors, shellColors, viridis, cssGradient, writeColors, voltageColor, latColor, FIBROTIC, UNMAPPED, SHELL_COLOR } from '../render/colormaps';
+import { regionColors, scalarColors, shellColors, viridis, cssGradient, writeColors, voltageColor, latColor, FIBROTIC, UNMAPPED, SHELL_COLOR, LESION_CORE, LESION_BORDER, lesionTagColor, type RGB } from '../render/colormaps';
+import { AblationPanel } from './AblationPanel';
+import { lesionGaps } from '../core/ablation/lesion';
 import { initSimulation, latestVm } from './sim-client';
 import { SimPanel } from './SimPanel';
 import { CatheterPanel, SignalsPanel } from './CatheterPanel';
@@ -25,6 +27,7 @@ import * as S from './state';
 const THICKNESS_RANGE: [number, number] = [0.5, 3.0];
 const NARROW = typeof window !== 'undefined' && window.matchMedia('(max-width: 800px)').matches;
 
+const ESOPHAGEAL_ZONE: RGB = [0.86, 0.74, 0.5];
 let teacherBuf = new Float32Array(0);
 let mapBuf = new Float32Array(0);
 /** Latest map product (recomputed when points or map settings change). */
@@ -57,13 +60,15 @@ function teacherColors(n: number): Float32Array | null {
       const a = S.gtActivation.value, r = latRange();
       if (!a || !r || a.last.length !== n) return null;
       const span = Math.max(1, r.hi - r.lo);
-      writeColors(out, n, (i) => (a.fibrotic[i] ? FIBROTIC : a.last[i]! >= a.beatStart && Number.isFinite(a.last[i]!) ? latColor((a.last[i]! - r.lo) / span) : UNMAPPED));
+      writeColors(out, n, (i) => (a.lesion[i] === 2 ? LESION_CORE : a.fibrotic[i] ? FIBROTIC : a.last[i]! >= a.beatStart && Number.isFinite(a.last[i]!) ? latColor((a.last[i]! - r.lo) / span) : UNMAPPED));
       return out;
     }
     case 'substrate': {
       const a = S.gtActivation.value;
       if (!a || a.fibrotic.length !== n) return null;
-      writeColors(out, n, (i) => (a.fibrotic[i] ? FIBROTIC : SHELL_COLOR));
+      const kind = S.lesionKind.value ?? a.lesion;
+      const zone = S.esophagealZone.value;
+      writeColors(out, n, (i): RGB => (kind[i] === 2 ? LESION_CORE : kind[i] === 1 ? LESION_BORDER : a.fibrotic[i] ? FIBROTIC : zone?.[i] ? ESOPHAGEAL_ZONE : SHELL_COLOR));
       return out;
     }
   }
@@ -210,13 +215,28 @@ export function App() {
     if (r) viewer.current?.setCsCatheter(r.csPath, r.csElectrodes, r.transseptal);
   });
   useSignalEffect(() => viewer.current?.setRoving(S.roving.value));
+  // Lesion tags coloured by quality, and red segments across interlesion gaps.
+  useSignalEffect(() => {
+    const v = viewer.current, ls = S.lesions.value, threshold = S.ablationSettings.value.gapThreshold;
+    if (!v) return;
+    if (!S.showLesionTags.value) return v.setLesionTags([], null);
+    const gaps = lesionGaps(ls, threshold);
+    const seg = new Float32Array(gaps.length * 6);
+    gaps.forEach((i, k) => { seg.set(ls[i - 1]!.center, 6 * k); seg.set(ls[i]!.center, 6 * k + 3); });
+    v.setLesionTags(ls.map((l) => ({ position: l.center, color: l.active ? [1, 1, 1] : lesionTagColor(l.lqi), active: l.active })), seg);
+  });
+  useSignalEffect(() => {
+    const r = S.rigInfo.value;
+    viewer.current?.setEsophagus(S.showEsophagus.value && r ? r.esophagus.path : null, r?.esophagus.radius);
+  });
   // Map products: recompute when points, settings or map display change.
   useSignalEffect(() => {
     void M.mapVersion.value;
     const disp = M.mapDisplay.value;
     void S.mesh.value;
     currentMap = M.session && M.session.points.length ? computeMap(disp.type) : null;
-    mapProductVersion.value++;
+    // peek(): `.value++` would also read the signal and make this effect re-trigger itself.
+    mapProductVersion.value = mapProductVersion.peek() + 1;
   });
   useSignalEffect(() => {
     void mapProductVersion.value;
@@ -274,6 +294,7 @@ export function App() {
         <SimPanel />
         <CatheterPanel />
         <MappingPanel />
+        <AblationPanel />
         <SignalsPanel />
         <AnatomyPanel />
         <DisplayPanel />
@@ -462,6 +483,9 @@ function Legend() {
       <details class="legend teacher-legend" open>
         <summary class="legend-title">Teacher · substrate</summary>
         <div class="legend-note"><span class="swatch" style={{ background: 'rgb(56,56,61)' }} /> fibrotic / inexcitable node</div>
+        <div class="legend-note"><span class="swatch" style={{ background: 'rgb(107,26,36)' }} /> transmural lesion core</div>
+        <div class="legend-note"><span class="swatch" style={{ background: 'rgb(219,140,153)' }} /> lesion border / partial thickness</div>
+        <div class="legend-note"><span class="swatch" style={{ background: 'rgb(219,189,128)' }} /> esophageal zone</div>
       </details>
     );
   }
@@ -505,7 +529,7 @@ function StatusBar() {
       if (S.teacherOverlay.value === 'lat' && a) {
         const r = latRange();
         const t = a.last[h.vertex]!;
-        hoverText += a.fibrotic[h.vertex] ? ' · fibrotic' : r && Number.isFinite(t) && t >= a.beatStart ? ` · true LAT ${(t - r.lo).toFixed(1)} ms` : ' · not activated';
+        hoverText += a.lesion[h.vertex] === 2 ? ' · lesion core' : a.fibrotic[h.vertex] ? ' · fibrotic' : r && Number.isFinite(t) && t >= a.beatStart ? ` · true LAT ${(t - r.lo).toFixed(1)} ms` : ' · not activated';
       }
     }
   }

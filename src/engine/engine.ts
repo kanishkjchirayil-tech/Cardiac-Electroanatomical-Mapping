@@ -15,6 +15,9 @@ import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording'
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
 import { Region } from '../core/mesh/regions';
 import type { EgmSamples } from '../core/ep/backend';
+import { AblationController, DEFAULT_ABLATION, applyLesionsToSubstrate, type AblationSettings } from '../core/ablation/controller';
+import { buildEsophagus, type EsophagusModel } from '../core/ablation/esophagus';
+import type { RfFrame } from './protocol';
 
 /**
  * Simulation engine hosted in a worker. Owns the tissue, the solver backend (WebGPU with CPU
@@ -59,6 +62,14 @@ export class SimEngine {
   private refName = 'CS 7-8';
   /** Indices of the channels shown in the EGM panel. */
   private displayIdx: number[] = [];
+  // Ablation (MODEL.md §5).
+  private ablation: AblationController | null = null;
+  private esophagus: EsophagusModel | null = null;
+  private ablationSettings: AblationSettings = { ...DEFAULT_ABLATION };
+  /** Per-vertex EGM source multiplier and teacher-view lesion raster from the current lesions. */
+  private lesionSource: Float32Array | null = null;
+  private lesionKind: Uint8Array | null = null;
+  private rfVertex = -1;
 
   constructor(private readonly post: (msg: FromWorker, transfer?: Transferable[]) => void) {}
 
@@ -71,6 +82,7 @@ export class SimEngine {
   init(mesh: SurfaceMesh, config: SimConfig): Promise<void> {
     this.mesh = mesh;
     this.config = { ...config };
+    this.ablation = null;
     return this.enqueue(() => this.rebuild());
   }
 
@@ -87,6 +99,7 @@ export class SimEngine {
 
   private async rebuild(): Promise<void> {
     if (!this.mesh) return;
+    const oldNow = this.now();
     const gen = ++this.generation;
     const t0 = performance.now();
     const c = this.config;
@@ -95,6 +108,15 @@ export class SimEngine {
     const model = createIonicModel(this.ionic);
     this.post({ type: 'status', message: 'Building tissue…' });
     this.tissue = buildTissue(this.mesh, { ...preset, fibrosis: { ...preset.fibrosis, pattern: c.fibrosisPattern } }, c.seed, c.fibrosisScale);
+    if (!this.ablation) {
+      this.esophagus = buildEsophagus(this.mesh, c.seed);
+      this.ablation = new AblationController(this.mesh, this.esophagus.zone);
+    } else {
+      // Lesions are tissue: they survive a rebuild; the clock restarts at 0.
+      this.ablation.stop(oldNow);
+      this.ablation.rebase(oldNow, 0);
+    }
+    this.rasterizeLesions(0);
     this.post({ type: 'status', message: 'Calibrating conduction velocity…' });
     const dt = model.recommendedDt;
     this.cal = await calibrateDiffusivity(this.ionic, preset.targetCv, { h: this.tissue.geom.meanEdge, dt });
@@ -154,13 +176,14 @@ export class SimEngine {
       eikonalMs,
     };
     this.post({ type: 'ready', info, config: { ...c }, rig: this.rigInfo() });
+    this.postLesions();
     await this.postFrame(true);
   }
 
   /** Electrodes, lead fields and recording system for the current tissue. */
   private buildRig(): void {
-    const mesh = this.mesh!, sub = this.tissue!.substrate;
-    this.rig = new ElectrogramRig(mesh, { thickness: mesh.wallThickness, fibrosisDepth: sub.fibrosisDepth, excitable: sub.excitable() }, this.config.seed, this.signals);
+    const mesh = this.mesh!;
+    this.rig = new ElectrogramRig(mesh, this.sourceOptions(), this.config.seed, this.signals);
     this.rig.motionEnabled = this.motionEnabled;
     if (this.rovingVertex < 0 || this.rovingVertex >= mesh.region.length) this.rovingVertex = defaultRovingVertex(mesh);
     this.rig.placeRoving(this.rovingVertex, this.rovingConfig);
@@ -205,6 +228,7 @@ export class SimEngine {
       csElectrodes: r.cs.electrodes.flat(),
       // Entry point 3 mm inside the septal wall at the fossa.
       transseptal: [0, 1, 2].map((k) => P[3 * v + k]! - 3 * N[3 * v + k]!),
+      esophagus: { path: this.esophagus?.path.flat() ?? [], radius: this.esophagus?.radius ?? 0 },
     };
   }
 
@@ -252,26 +276,46 @@ export class SimEngine {
     return Math.max(tpl.at(phase - ti), tpl.at(phase + cl - ti));
   }
 
-  /** Precompute one cycle of the non-moving electrodes (ECG, CS) in eikonal mode. */
+  /**
+   * Precompute one cycle of the non-moving electrodes (ECG, CS) in eikonal mode. Each vertex's
+   * Vm depends on t only through t − T_i, so lead-field weights are binned by activation time
+   * (linear split between neighbouring 0.5 ms bins) and every sample becomes a short dot product
+   * over bins: φ_r(t) = Σ_k W_r[k] · Vm_k(t).
+   */
   private buildEikonalTable(): void {
-    if (!this.rig || !this.eikonalT) return;
+    if (!this.rig || !this.eikonalT || !this.template) return;
     const step = 1000 / EGM_FS;
     const cl = this.config.sinusCl > 0 ? this.config.sinusCl : 600;
     const len = Math.round(cl / step);
     const rows = this.rig.electrodes.map((e, i) => (e.group === 'ecg' || e.group === 'cs' ? i : -1)).filter((i) => i >= 0);
     const fields = this.rig.rows();
-    const n = this.eikonalT.length;
-    const vm = new Float32Array(n);
+    const T = this.eikonalT;
+    let tMax = 0;
+    for (const t of T) if (Number.isFinite(t)) tMax = Math.max(tMax, t);
+    const nBins = Math.ceil(tMax / step) + 2;
+    const W = new Float64Array(rows.length * nBins);
+    rows.forEach((r, j) => {
+      const f = fields[r]!;
+      for (let q = 0; q < f.idx.length; q++) {
+        const ti = T[f.idx[q]!]!;
+        if (!Number.isFinite(ti)) continue;
+        const x = ti / step, k = Math.floor(x), a = x - k;
+        W[j * nBins + k] += (1 - a) * f.w[q]!;
+        W[j * nBins + k + 1] += a * f.w[q]!;
+      }
+    });
+    const tpl = this.template, periodic = this.config.sinusCl > 0;
+    const vm = new Float64Array(nBins);
     const data = new Float32Array(len * rows.length);
-    for (let k = 0; k < len; k++) {
-      const t = this.config.sinusCl > 0 ? k * step + this.config.sinusCl : k * step;
-      for (let i = 0; i < n; i++) vm[i] = this.eikVm(i, t);
-      rows.forEach((r, j) => {
-        const f = fields[r]!;
+    for (let s = 0; s < len; s++) {
+      const phase = s * step;
+      for (let k = 0; k < nBins; k++) vm[k] = periodic ? Math.max(tpl.at(phase - k * step), tpl.at(phase + cl - k * step)) : tpl.at(phase - k * step);
+      for (let j = 0; j < rows.length; j++) {
         let acc = 0;
-        for (let q = 0; q < f.idx.length; q++) acc += f.w[q]! * vm[f.idx[q]!]!;
-        data[k * rows.length + j] = acc;
-      });
+        const o = j * nBins;
+        for (let k = 0; k < nBins; k++) acc += W[o + k]! * vm[k]!;
+        data[s * rows.length + j] = acc;
+      }
     }
     this.eikTable = { data, len, rows };
   }
@@ -465,6 +509,7 @@ export class SimEngine {
         this.nextMotionT = (Math.floor(now / MOTION_UPDATE_MS + 1e-9) + 1) * MOTION_UPDATE_MS;
       }
       const piece = Math.min(end, this.rig ? this.nextMotionT : end) - now;
+      this.stepAblation(now, piece);
       if (this.sim) {
         await this.sim.advance(Math.max(piece, this.dt()));
         this.collect(this.sim.backend.drainSamples());
@@ -488,7 +533,8 @@ export class SimEngine {
     else v = this.eikonalVm();
     const egm = this.drainEgm();
     const roving = this.rovingFrame();
-    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
+    const rf = this.rfFrame();
+    this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving, rf }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
   }
 
   /** Feed processed samples to the beat extractor and post completed reference beats. */
@@ -590,9 +636,123 @@ export class SimEngine {
       } else {
         last = this.eikonalT ? this.eikonalT.slice() : new Float32Array(n).fill(-Infinity);
       }
-      const fibrotic = this.tissue ? Uint8Array.from(this.tissue.substrate.excitable(), (e) => 1 - e) : new Uint8Array(n);
-      this.post({ type: 'activation', t: this.now(), last, beatStart, fibrotic }, [last.buffer, fibrotic.buffer]);
+      const fibrotic = this.tissue ? this.tissue.substrate.fibroticNode.slice() : new Uint8Array(n);
+      const lesion = this.lesionKind?.slice() ?? new Uint8Array(n);
+      this.post({ type: 'activation', t: this.now(), last, beatStart, fibrotic, lesion }, [last.buffer, fibrotic.buffer, lesion.buffer]);
     });
+  }
+
+  // ---- Ablation -------------------------------------------------------------------------------
+
+  private sourceOptions() {
+    const sub = this.tissue!.substrate;
+    return { thickness: this.mesh!.wallThickness, fibrosisDepth: sub.fibrosisDepth, excitable: sub.excitable(), sourceScale: this.lesionSource ?? undefined };
+  }
+
+  /** Rasterize the lesion set into the substrate (no solver/rig update). */
+  private rasterizeLesions(now: number): void {
+    if (!this.ablation || !this.tissue) return;
+    const f = this.ablation.rasterize(now);
+    applyLesionsToSubstrate(this.tissue.substrate, f);
+    this.lesionSource = f.source;
+    this.lesionKind = f.kind;
+    this.edemaCheckT = this.ablation.nextEdemaExpiry(now);
+  }
+
+  private edemaCheckT = Infinity;
+
+  /**
+   * Re-rasterize lesions and push the changed tissue everywhere it is used: solver diffusivities
+   * and excitability (reaction–diffusion), the eikonal map, and the EGM lead fields.
+   */
+  private applyLesions(): void {
+    if (!this.tissue || !this.cal) return;
+    const now = this.now();
+    this.rasterizeLesions(now);
+    const sub = this.tissue.substrate;
+    if (this.sim) {
+      this.sim.backend.setEdgeDiffusivity(sub.edgeDiffusivity(this.cal.D));
+      this.sim.backend.setVertexParams(sub.apdScale, sub.excitable());
+    } else {
+      this.eikonalT = this.computeEikonal();
+    }
+    if (this.rig) {
+      this.rig.updateSources(this.sourceOptions());
+      this.uploadLeadFields();
+      if (!this.sim) this.buildEikonalTable();
+    }
+    this.postLesions();
+  }
+
+  private postLesions(): void {
+    if (!this.ablation || !this.lesionKind || !this.esophagus) return;
+    const kind = this.lesionKind.slice(), zone = this.esophagus.zone.slice();
+    this.post({ type: 'lesions', lesions: this.ablation.lesions.map((l) => ({ ...l, center: [...l.center] })), kind, esophagealZone: zone }, [kind.buffer, zone.buffer]);
+  }
+
+  /** Advance an active RF application over `piece` ms of simulated time; handle edema expiry. */
+  private stepAblation(now: number, piece: number): void {
+    const a = this.ablation, rig = this.rig;
+    if (!a || !rig) return;
+    if (a.active) {
+      const r = rig.rovingState();
+      if (!r || r.config.type !== 'ablation' || r.vertex !== this.rfVertex) {
+        a.stop(now);
+        this.applyLesions();
+      } else {
+        const res = a.step((piece / 1000) * this.ablationSettings.timeScale, r.pose.force, now + piece);
+        // Reaction–diffusion follows the growing lesion; the eikonal map is recomputed when RF ends.
+        if (res?.changed && (this.sim || !a.active)) this.applyLesions();
+      }
+    }
+    if (now >= this.edemaCheckT) this.applyLesions();
+  }
+
+  setAblationSettings(settings: AblationSettings): void {
+    this.ablationSettings = { ...settings };
+  }
+
+  /** Start RF at the roving catheter tip; `instant` delivers the whole application at once. */
+  rfStart(instant: boolean): Promise<void> {
+    return this.enqueue(async () => {
+      const a = this.ablation, r = this.rig?.rovingState();
+      if (!a || !r) return;
+      if (r.config.type !== 'ablation') throw new Error('Only the ablation catheter can deliver RF.');
+      this.rfVertex = r.vertex;
+      if (instant) {
+        a.deliver(r.vertex, r.pose.contact, this.ablationSettings, r.config.force, this.now());
+        this.applyLesions();
+      } else {
+        a.start(r.vertex, r.pose.contact, this.ablationSettings, this.now());
+        this.postLesions();
+      }
+      await this.postFrame(true);
+    });
+  }
+
+  rfStop(): Promise<void> {
+    return this.enqueue(async () => {
+      if (!this.ablation?.active) return;
+      this.ablation.stop(this.now());
+      this.applyLesions();
+      await this.postFrame(true);
+    });
+  }
+
+  resetLesions(): Promise<void> {
+    return this.enqueue(async () => {
+      this.ablation?.reset();
+      this.applyLesions();
+      await this.postFrame(true);
+    });
+  }
+
+  private rfFrame(): RfFrame | null {
+    const a = this.ablation;
+    const r = a?.readout();
+    if (!a || !r) return null;
+    const L = a.lesions[a.lesions.length - 1]!;
+    return { ...r, lesionId: L.id, inEsophagealZone: this.esophagus?.zone[L.vertex] === 1 };
   }
 
   runLab(): Promise<void> {

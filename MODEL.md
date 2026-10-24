@@ -10,7 +10,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 - [2. Electrophysiology engine](#2-electrophysiology-engine) — implemented (M2)
 - [3. Catheters and signals](#3-catheters-and-signals) — implemented (M3)
 - [4. Mapping](#4-mapping) — implemented (M4)
-- [5. Ablation](#5-ablation) — *(planned, M5)*
+- [5. Ablation](#5-ablation) — implemented (M5)
 - [6. Pacing and scenarios](#6-pacing-and-scenarios) — *(planned, M6)*
 - [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — *(planned, M7)*
 - [Known limitations](#known-limitations)
@@ -736,7 +736,129 @@ point's fill radius stay gray ("no data").
   - Grid catheter, 640 points (manual run): median 0.5 ms, maximum 1.7 ms.
 
 ## 5. Ablation
-*(planned, M5.)*
+
+Code: `src/core/ablation/` (`lesion.ts`, `rf.ts`, `controller.ts`, `esophagus.ts`, `rings.ts`), wired
+into the engine in `src/engine/engine.ts`. The lesion model is **empirical and phenomenological**. It
+reproduces the qualitative dependences reported in ex-vivo and clinical studies [30–34], not a
+thermal (bioheat) simulation. Every constant below is configurable in `DEFAULT_LESION_MODEL` and
+`RF_CONSTANTS`.
+
+### 5.1 Lesion size
+
+Contact force couples power into tissue through a saturating factor. The delivered dose is the
+coupled energy:
+
+  c(F) = 1 − exp(−F / F_c)                    F_c = 10 g
+  E = ∫ P(t) · c(F(t)) dt                     (J; F(t) is the live, motion-modulated force)
+
+Depth and diameter saturate with dose. Higher power widens the lesion more than it deepens it, a
+qualitative high-power short-duration effect [33]:
+
+  D = D_max · (1 − exp(−E / E_D))                      D_max = 6 mm, E_D = 900 J
+  W = W_max · (1 − exp(−E · √(P / P_ref) / E_W))      W_max = 10 mm, E_W = 600 J, P_ref = 30 W
+
+| Settings | Depth | Diameter |
+|---|---|---|
+| 30 W · 30 s · 15 g | 3.2 mm | 6.9 mm |
+| 35 W · 20 s · 15 g | 2.7 mm | 6.2 mm |
+| 50 W · 6 s · 15 g | 1.4 mm | 3.9 mm |
+| 30 W · 30 s · 3 g | 1.4 mm | 3.2 mm |
+
+Low force (< 5 g) gives small, often non-transmural lesions, which matches the association between
+low contact force and PV reconnection [31, 32].
+
+### 5.2 RF readouts and the lesion quality index
+
+- **Force–time integral** FTI = ∫ F dt (g·s) [30].
+- **Impedance.** Baseline Z₀ = 110 Ω − 0.3 Ω/g · min(F, 30). It drops as
+  ΔZ = 15 Ω · (1 − exp(−E / 350 J)), so a good lesion shows a 10–15 Ω fall, the usual clinical range.
+- **Lesion quality index (LQI).** An open index of our own: **LQI = 10 · D / t_wall**, where D is
+  the predicted depth from §5.1 and t_wall is the local wall thickness. LQI 10 means the predicted
+  lesion is just transmural. Because D comes from coupled energy, the index combines power, time and
+  force. It is deliberately different from proprietary indices [35] and is not calibrated to them.
+- **Lesion tags** are coloured by LQI: green ≥ 10, amber 8–10, red < 8.
+
+### 5.3 Lesion raster and tissue effect
+
+Each lesion is an oblate half-ellipsoid of radius R = W/2 and depth D, centred on the contact
+vertex. At geodesic surface distance s from the centre (truncated fast marching, §4.4), its depth is
+d(s) = D · √(1 − (s/R)²). Each vertex v, with wall thickness t_v, falls into one of these zones:
+
+| Zone | Condition | Conductivity σ | EGM source | Excitable |
+|---|---|---|---|---|
+| Transmural core | d(s) ≥ t_v | 0 | 0 | no |
+| Partial thickness | 0 < d(s) < t_v | × (1 − 0.6·d/t) | × (1 − d/t) | yes |
+| Border | R < s ≤ R + 2 mm | × 0.6 | × 0.8 | yes |
+
+Overlapping lesions take the most severe value at each vertex. Cores set `Substrate.lesionCore`
+(isolating the node like fibrosis, §2.3), and the σ factor multiplies `lesionConductivity`. The
+engine then updates the solver's edge diffusivities and excitability, recomputes the eikonal map,
+and rebuilds the EGM lead fields with the source factor, so electrograms over ablated tissue shrink
+or disappear.
+
+- **Transmurality is decided per vertex.** A ring blocks only where the cores join into a closed
+  barrier. Non-transmural segments leave a conducting isthmus, so gaps and later reconnection
+  emerge from the same physics as block.
+- **Growth.** In reaction–diffusion mode, the lesion is re-rasterized every 2 s of RF while it grows.
+  In eikonal mode, it is re-rasterized when the application ends.
+- **Interlesion distance.** The centre-to-centre distance to the previous lesion is shown. Distances
+  above the gap threshold (default 6 mm [34]) are flagged and drawn as red segments. A jump of more
+  than 20 mm counts as the start of a new lesion set, not a gap.
+
+### 5.4 Edema (optional)
+
+Reversible injury around a fresh lesion can produce acute block that is later lost [36]. While
+edema is active, R grows by 2 mm and D by × 1.5, so a marginal lesion can be transiently
+transmural. Edema resolves after a configurable simulated time (default 30 s, compressed for
+teaching; in reality it lasts tens of minutes or more). At that point the lesion set is
+re-rasterized. Lesions survive a tissue rebuild, and their remaining edema time is preserved.
+
+### 5.5 RF clock
+
+Real RF applications last 5–60 s. At reaction–diffusion speeds that would mean minutes of waiting,
+so the RF clock runs at a configurable multiple of simulated time (1–20×, default 10×). The
+**Instant** option delivers the whole application at once at the set force. The scaling is
+labelled in the UI as an educational simplification. RF stops when the catheter is moved or the
+catheter type changes.
+
+### 5.6 Esophagus
+
+The esophagus is a vertical tube of radius 6 mm, 2 mm behind the posterior epicardium. Its lateral
+position is seeded at x = (0.12 ± 0.08) · r_x, usually slightly left of the midline [37]. Posterior,
+inferior, roof and antral vertices facing posteriorly (n_y > 0.5) within 9 mm of its axis form the
+**esophageal zone**.
+
+During RF in the zone, the luminal temperature is estimated as:
+
+  T = 37 °C + 0.11 · P · c(F) · exp(−g / 1.2 mm) · (1 − exp(−t / 12 s))
+  g = max(0, t_wall + 2 mm − D)                  (tissue left between the lesion and the lumen)
+
+A warning appears at 39 °C, within the 38.5–39 °C range used in clinical luminal-temperature
+monitoring [38]. With a 1.5 mm posterior wall and 15 g, a 40 W application crosses the warning after about 20 s,
+while 20–25 W applications of 10 s stay below it.
+
+### 5.7 Validation
+
+`tests/ablation.test.ts`:
+
+- **Lesion size and readouts.**
+  - Size is monotonic in power, time and force, and saturates.
+  - Standard settings give 2.5–4.5 mm depth and 5–8.5 mm diameter.
+  - Impedance falls monotonically, FTI integrates force exactly, and the esophageal warning
+    triggers only at high power in the zone.
+- **Interlesion distances.** A 4 mm-spaced ring raises no gap warning; removing two lesions does.
+- **Conduction (reaction–diffusion, healthy LA).** A 30-lesion ring placed 5 mm outside the LSPV
+  ostium is tested with sinus rhythm and with pacing inside the vein:
+
+  | Lesion set | Result |
+  |---|---|
+  | Complete ring, 35 W · 20 s · 15 g (LQI ≈ 16) | **Entrance block** (0 % of the LSPV sleeve activated) and **exit block** (0 % of the LA body activated by pacing inside the vein) |
+  | Same ring, two lesions removed (≈ 12 mm gap) | Conduction preserved (> 95 % of the sleeve activated) |
+  | Low force, 20 W · 10 s · 3 g (LQI < 10) | No transmural core; conduction preserved |
+  | Marginal ring with edema, 25 W · 16 s · 10 g | Acute block, then reconnection after the edema resolves |
+- **Engine.** RF on the accelerated clock reports live readouts, ends at the set duration, and
+  updates the lesion list. A ring completed with instant applications removes the vein from the
+  eikonal activation map. Resetting lesions restores the tissue.
 
 ## 6. Pacing and scenarios
 *(planned, M6.)*
@@ -788,6 +910,18 @@ point's fill radius stay gray ("no data").
   signals (the model has no ventricles).
 - **Anatomy build** reveals the existing shell rather than reconstructing it, so catheter-geometry
   errors are not simulated.
+
+### Ablation (M5)
+- **Empirical lesions, no thermal model.** There is no bioheat equation, blood-flow cooling, irrigation,
+  electrode orientation, steam pop, char or thrombus. Size depends on coupled energy and power only.
+  Catheter angle does not change the lesion.
+- **Surface raster.** Lesions are painted onto the surface by geodesic distance. Depth is compared with
+  the per-vertex wall thickness, not resolved through the wall, so endocardial-only sparing of
+  epicardial bundles is not represented.
+- **Indices are illustrative.** The impedance, esophageal-temperature and LQI formulas are
+  phenomenological and uncalibrated. Do not read them as clinical targets.
+- **Compressed time.** The RF clock and edema recovery are compressed for teaching (§5.5).
+  Late reconnection from tissue healing is represented only through edema.
 
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
@@ -844,3 +978,12 @@ point's fill radius stay gray ("no data").
 27. Plonsey R, Barr RC. *Bioelectricity: A Quantitative Approach*, 3rd ed. Springer, 2007 (volume-conductor dipole sources).
 28. Stevenson WG, Soejima K. Recording techniques for clinical electrophysiology. *J Cardiovasc Electrophysiol* 2005;16:1017–1022.
 29. Rolf S, Kircher S, Arya A, et al. Tailored atrial substrate modification based on low-voltage areas in catheter ablation of atrial fibrillation. *Circ Arrhythm Electrophysiol* 2014;7:825–833.
+30. Shah DC, Lambert H, Nakagawa H, Langenkamp A, Aeby N, Leo G. Area under the real-time contact force curve (force–time integral) predicts radiofrequency lesion size in an in vitro contractile model. *J Cardiovasc Electrophysiol* 2010;21:1038–1043.
+31. Reddy VY, Shah D, Kautzner J, et al. The relationship between contact force and clinical outcome during radiofrequency catheter ablation of atrial fibrillation in the TOCCATA study. *Heart Rhythm* 2012;9:1789–1795.
+32. Neuzil P, Reddy VY, Kautzner J, et al. Electrical reconnection after pulmonary vein isolation is contingent on contact force during initial treatment: results from the EFFICAS I study. *Circ Arrhythm Electrophysiol* 2013;6:327–333.
+33. Leshem E, Zilberman I, Tschabrunn CM, et al. High-power and short-duration ablation for pulmonary vein isolation: biophysical characterization. *JACC Clin Electrophysiol* 2018;4:467–479.
+34. Taghji P, El Haddad M, Phlips T, et al. Evaluation of a strategy aiming to enclose the pulmonary veins with contiguous and optimized radiofrequency lesions in paroxysmal atrial fibrillation: a pilot study. *JACC Clin Electrophysiol* 2018;4:99–108.
+35. Das M, Loveday JJ, Wynn GJ, et al. Ablation index, a novel marker of ablation lesion quality: prediction of pulmonary vein reconnection at repeat electrophysiology study and regional differences in target values. *Europace* 2017;19:775–783.
+36. Arujuna A, Karim R, Caulfield D, et al. Acute pulmonary vein isolation is achieved by a combination of reversible and irreversible atrial injury after catheter ablation: evidence from magnetic resonance imaging. *Circ Arrhythm Electrophysiol* 2012;5:691–700.
+37. Good E, Oral H, Lemola K, et al. Movement of the esophagus during left atrial catheter ablation for atrial fibrillation. *J Am Coll Cardiol* 2005;46:2107–2110.
+38. Leite LR, Santos SN, Maia H, et al. Luminal esophageal temperature monitoring with a deflectable esophageal temperature probe and intracardiac echocardiography may reduce esophageal injury during atrial fibrillation ablation procedures. *Circ Arrhythm Electrophysiol* 2011;4:149–156.
