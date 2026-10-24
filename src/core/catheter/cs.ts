@@ -30,6 +30,7 @@ export interface CsOptions {
 export const DEFAULT_CS: CsOptions = { radialOffset: 5, atrialOffset: 6, clearance: 1.5, proximalInset: 4 };
 
 export function buildCsCatheter(mesh: SurfaceMesh, opts: Partial<CsOptions> = {}): CsCatheter {
+  if (mesh.chamber === 'RA' && mesh.anatomy?.ra) return buildCsCatheterRa(mesh);
   const o = { ...DEFAULT_CS, ...opts };
   const loop = mesh.boundaryLoops.find((l) => l.label === 'MV');
   if (!loop) throw new Error('The mesh has no mitral annulus opening (MV boundary loop)');
@@ -102,6 +103,34 @@ export function buildCsCatheter(mesh: SurfaceMesh, opts: Partial<CsOptions> = {}
   };
   const prox: Vec3[] = [];
   let s = o.proximalInset;
+  prox.push(at(s));
+  for (const gap of CS_SPACING) {
+    s += gap;
+    prox.push(at(s));
+  }
+  return { electrodes: prox.reverse(), path };
+}
+
+/**
+ * Right-atrium chamber (MODEL.md §8.2): the CS catheter enters from the IVC, crosses the RA floor
+ * and passes through the CS ostium. CS 9-10 lie in the ostium; the more distal electrodes continue
+ * along the CS axis beyond the simulated chamber (the left-atrial AV groove is not modelled, so they
+ * record only far-field RA activity).
+ */
+export function buildCsCatheterRa(mesh: SurfaceMesh): CsCatheter {
+  const ra = mesh.anatomy!.ra!;
+  const os = ra.csOs.center, ax = normalize(ra.csOs.axis);
+  const ivc = ra.ivc.center, ivcAx = normalize(ra.ivc.axis);
+  const body = mesh.anatomy!.bodyCenter;
+  const floor: Vec3 = add(scale(add(ivc, os), 0.5), scale(sub(body, scale(add(ivc, os), 0.5)), 0.25));
+  const path: Vec3[] = [add(ivc, scale(ivcAx, 25)), add(ivc, scale(ivcAx, 5)), floor, sub(os, scale(ax, 4))];
+  const total = 3 + CS_SPACING.reduce((a, b) => a + b, 0) + 10;
+  for (let s = 0; s <= total; s += 2) path.push(add(os, scale(ax, s)));
+  // The catheter lies against the inferior wall of the CS: proximal electrodes 3.1 mm off the axis.
+  const down = normalize(sub([0, 0, -1], scale(ax, -ax[2])));
+  const at = (d: number): Vec3 => add(add(os, scale(ax, d)), scale(down, d < 10 ? 3.1 : 0));
+  const prox: Vec3[] = [];
+  let s = 1;
   prox.push(at(s));
   for (const gap of CS_SPACING) {
     s += gap;

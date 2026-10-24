@@ -34,6 +34,8 @@ export const fps = signal(0);
 
 export const genSeed = signal(1);
 export const genVariability = signal(0);
+/** Chamber for procedural generation (the RA is the stretch goal). */
+export const genChamber = signal<'LA' | 'RA'>('LA');
 
 // ---- Simulation ----
 export type TeacherOverlay = 'vm' | 'lat' | 'substrate' | 'autonomic';

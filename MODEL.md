@@ -13,6 +13,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 - [5. Ablation](#5-ablation) — implemented (M5)
 - [6. Pacing and scenarios](#6-pacing-and-scenarios) — implemented (M6)
 - [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — implemented (M7)
+- [8. Right atrium and typical flutter](#8-right-atrium-and-typical-flutter-stretch-goal) — implemented (stretch goal)
 - [Known limitations](#known-limitations)
 - [References](#references)
 
@@ -1274,6 +1275,128 @@ Reaction–diffusion batches are far slower without a GPU.
 - **Batch:** two eikonal cases × 5 points, every point labelled, with the requested window length;
   repeated runs are byte-identical.
 
+## 8. Right atrium and typical flutter (stretch goal)
+
+The right atrium is a **separate chamber mode**. The Anatomy panel (or a case that needs it)
+generates an RA shell instead of the LA. Each chamber is simulated on its own, with no biatrial
+coupling. Every subsystem (solver, mapping, ablation, pacing, export, batch) works unchanged on
+either shell.
+
+### 8.1 Anatomy
+
+Code: `src/core/mesh/sdf-ra.ts` and `labels-ra.ts`, through `generateAtrium({ chamber: 'RA' })`.
+The pipeline is the same as the LA's (§1.2–1.3): implicit surface, surface nets, cut openings,
+isotropic remeshing to ≈ 0.95 mm.
+
+**Shape** (LPS mm, centred on the RA):
+
+| Part | Geometry |
+|---|---|
+| Body | ellipsoid, radii 24 × 22 × 27 mm |
+| SVC | tube, radius 9.5 mm, entering superiorly and slightly posteriorly |
+| IVC | tube, radius 11.5 mm, entering inferoposteriorly |
+| CS ostium | short tube, radius 4.5 mm, on the inferoseptal wall between the IVC and the tricuspid annulus |
+| RA appendage | broad two-segment tube, anterosuperior |
+| Tricuspid annulus | cut plane facing the right ventricle (anterior, leftward, slightly inferior); radius ≈ 17 mm |
+
+The default mesh has 12.1 k vertices, is manifold, and has a minimum angle of 24°.
+
+**Regions** (appended to the frozen enum, ids 18–27). Precedence runs top to bottom:
+
+1. **SVC, IVC, CS ostium, RA appendage**, by primitive ownership.
+2. **Tricuspid annulus:** a 5 mm band.
+3. **Cavotricuspid isthmus (CTI):** inferior vertices lateral to the CS ostium, with
+   d(IVC) + d(TV) ≤ minimum + 9 mm. The isthmus is ≈ 20 mm long on the default mesh.
+4. **Crista terminalis:** a ± 2.5 mm band around an edge path from the SVC to the IVC through the
+   most posterolateral point.
+5. **Septum** (normalized x > 0.35).
+6. **Posterior smooth venous sinus.**
+7. **Trabeculated free wall.**
+
+**Wall thickness** (mm):
+
+| Crista | CTI | Annulus | Septum | Free wall | Appendage | Cavae |
+|---|---|---|---|---|---|---|
+| 4.5 | 3.5 | 3.0 | 2.2 | 2.0 | 1.6 | 1.2 |
+
+The crista and CTI values reflect their thick, muscular structure [53, 54]. The thickness ceiling
+was raised to 6 mm; LA meshes are unaffected.
+
+**Landmarks.** `anatomy.ra` holds the SVC, IVC and CS ostium, the crista centreline, and the sinus
+node: the first crista vertex ≥ 6 mm below the SVC junction. For generic code, `anatomy.mitral`
+holds the tricuspid annulus and `anatomy.laa` the RA appendage; `pvs` is empty.
+
+### 8.2 Electrophysiology and catheters in the RA
+
+- **Sinus rhythm.** A single site at the sinus node (4 mm radius) [55]. Activation spreads over the
+  RA in ≈ 60–140 ms at 0.75 m/s (eikonal).
+- **Crista terminalis.** The crista is a line of **transverse conduction block**. Edges joining the
+  crista band to its tricuspid-facing (anterior) side are uncoupled (104 edges on the default
+  mesh). The band stays coupled to the posterior venous sinus and along its length, and nothing is
+  isolated (tested).
+
+  In vivo this block is functional and rate-dependent, and it forms the posterior boundary of
+  typical flutter [54]. Here it is structural. In the validation runs, the flutter behaved the same
+  with and without it.
+- **CS catheter.** It enters from the IVC, crosses the floor and passes through the ostium.
+  - CS 9-10 lie in the ostium, 3.1 mm off its axis (against the wall), and record ≈ 0.8 mV.
+  - CS 1-8 continue along the CS axis beyond the chamber. The LA is not simulated in this mode, so
+    they record only far field.
+  - CS 9-10 is therefore the default timing reference in the RA.
+- **Roving catheter.** Its shaft enters from the IVC.
+- **No esophageal zone**, and no PV ectopy or GP zones in this mode.
+
+### 8.3 Typical flutter scenario
+
+**Substrate:**
+
+- paroxysmal ionic model (APD ≈ 190 ms);
+- CV 0.47–0.55 m/s, no fibrosis;
+- a **slow CTI zone**: σ × 0.30–0.40 within 8–11 mm of the isthmus centroid. Slower isthmus
+  conduction is reported in typical flutter [54]; the values are a modelling choice.
+
+**Induction** (§6.2). A transient line of block runs from the tricuspid annulus to the IVC across the
+CTI, with a stimulus on its septal side. The wave ascends the septum, crosses the roof, descends the
+lateral wall and re-enters the isthmus from lateral to septal: **counterclockwise** in the LAO
+view, the common form.
+
+The clockwise launch (stimulus on the lateral side) did not sustain at any release time tried
+(200–310 ms) on this anatomy, so it is not used. Re-induction (§6.2) applies.
+
+**Measured** on seeds 1–4: TCL 212–242 ms (mostly 220–227 ms). Clinical typical flutter is
+≈ 200–260 ms [53].
+
+**Ground truth: CTI block** means the tricuspid opening shares a barrier component with the IVC
+opening (§6.3).
+
+**Criteria:**
+
+- durable CTI block;
+- sinus rhythm at the end;
+- line block demonstrated by pacing (§6.3 evidence).
+
+The standard manoeuvre: pace from **CS 9-10** (the ostium, septal to the line) and record
+**just lateral** to it. With block, the wave must travel up the septum and around the annulus
+[56].
+
+**Validation** (`tests/ra.test.ts`; reaction–diffusion on the CPU, seed 3):
+
+- Flutter sustains at TCL 190–280 ms, and the ground truth reads "not sinus".
+- Entrainment from mid-isthmus gives |PPI − TCL| < 30 ms.
+- A CTI line (45 W × 30 s at 3 mm, as the isthmus is ≈ 3 mm thick) gives durable CTI block and
+  sinus rhythm.
+- CS-ostium pacing afterwards gives a stimulus-to-MAP time > 100 ms to a site < 35 mm away, lateral
+  to the line.
+- On seeds 1–4 alike, the CTI line terminated the flutter and sinus resumed.
+
+Anatomy tests check:
+
+- the openings, manifoldness and angle quality;
+- that every RA region is present, with an isthmus 15–40 mm long;
+- that the crista is thicker than the free wall, and the sinus node lies on the crista;
+- that the crista block isolates nothing;
+- CS electrode placement.
+
 ---
 
 ## Known limitations
@@ -1365,6 +1488,17 @@ Reaction–diffusion batches are far slower without a GPU.
   workflow. In arrhythmia scenarios, the beat windows are referenced to the CS like interactive
   mapping.
 
+### Right atrium (stretch goal)
+- **One chamber at a time.** The LA and RA are separate shells. There is no Bachmann's bundle or
+  interatrial conduction, no biatrial activation, and no LA signal on the distal CS in RA mode.
+- **Smooth surfaces.** There are no pectinate muscles, Eustachian ridge or valve, Thebesian
+  valve, or isthmus pouch. The CTI's slowing and thickness are regional parameters, not structure.
+- **Structural crista block.** In vivo, crista block is functional and rate-dependent. Here it is
+  a fixed line, and the sinus node site spans both sides of the crista.
+- **Counterclockwise only.** The circuit runs counterclockwise only, and there is no lower-loop or
+  upper-loop reentry scenario.
+- **Generated meshes only.** Imported meshes are always treated as LA.
+
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
   - Assumes equal intra- and extracellular anisotropy ratios.
@@ -1443,3 +1577,7 @@ Reaction–diffusion batches are far slower without a GPU.
 50. Patterson E, Po SS, Scherlag BJ, Lazzara R. Triggered firing in pulmonary veins initiated by in vitro autonomic nerve stimulation. *Heart Rhythm* 2005;2:624–631.
 51. Po SS, Scherlag BJ, Yamanashi WS, et al. Experimental model for paroxysmal atrial fibrillation arising at the pulmonary vein–atrial junctions. *Heart Rhythm* 2006;3:201–208.
 52. Katritsis DG, Pokushalov E, Romanov A, et al. Autonomic denervation added to pulmonary vein isolation for paroxysmal atrial fibrillation: a randomized clinical trial. *J Am Coll Cardiol* 2013;62:2318–2325.
+53. Saoudi N, Cosío F, Waldo A, et al. A classification of atrial flutter and regular atrial tachycardia according to electrophysiological mechanisms and anatomical bases: a statement from a joint expert group from the Working Group of Arrhythmias of the European Society of Cardiology and the North American Society of Pacing and Electrophysiology. *Eur Heart J* 2001;22:1162–1182.
+54. Olgin JE, Kalman JM, Fitzpatrick AP, Lesh MD. Role of right atrial endocardial structures as barriers to conduction during human type I atrial flutter: activation and entrainment mapping guided by intracardiac echocardiography. *Circulation* 1995;92:1839–1848.
+55. Boineau JP, Canavan TE, Schuessler RB, et al. Demonstration of a widely distributed atrial pacemaker complex in the human heart. *Circulation* 1988;77:1221–1237.
+56. Shah DC, Takahashi A, Jaïs P, Hocini M, Clémenty J, Haïssaguerre M. Local electrogram-based criteria of cavotricuspid isthmus block. *J Cardiovasc Electrophysiol* 1999;10:662–669.

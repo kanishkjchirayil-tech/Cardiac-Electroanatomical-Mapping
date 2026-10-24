@@ -20,6 +20,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | **M5** — Ablation and lesion tags | ✅ done |
 | **M6** — Pacing, entrainment, scenarios, case report | ✅ done |
 | **M7** — Autonomic module, dataset export, batch mode | ✅ done |
+| **Stretch** — Right atrium (CTI, tricuspid annulus, SVC/IVC) and typical flutter | ✅ done |
 
 ## Running
 
@@ -71,6 +72,7 @@ The sidebar has these panels:
     | Roof-dependent flutter | Diagnose it, then terminate it with a roof line; prove block by pacing. |
     | Focal atrial tachycardia | Find the earliest site and ablate the focus. |
     | Redo PVI — reconnection gap | Find the reconnected vein and close the gap. |
+    | Typical atrial flutter (right atrium) | Confirm the CTI-dependent circuit (entrain from the isthmus), ablate a CTI line, prove block by pacing from the CS ostium. |
   - The briefing shows the presentation, goal and success criteria (never the answer).
   - The arrhythmia starts by itself when you press **Run**.
   - **Cardiovert** resets the heart to rest.
@@ -168,7 +170,13 @@ The sidebar has these panels:
   - Noise level.
   - Bipolar and unipolar band-pass corners (defaults 30–500 Hz and 1–240 Hz).
 - **Anatomy**
-  - Generate a procedural LA. The seed sets anatomical variation and wall-thickness noise. Variability
+  - Choose **Left atrium** or **Right atrium**. The RA has:
+    - the SVC and IVC, the tricuspid annulus, the CS ostium and the appendage;
+    - the cavotricuspid isthmus;
+    - the crista terminalis, modelled as a line of block.
+
+    Starting the typical-flutter case switches to the RA automatically, and LA cases switch back.
+  - Generate the procedural chamber. The seed sets anatomical variation and wall-thickness noise. Variability
     0 gives the canonical shape; 1 gives typical variation.
   - Import a mesh.
 - **Display**

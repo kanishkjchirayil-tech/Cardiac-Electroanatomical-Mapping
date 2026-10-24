@@ -128,7 +128,7 @@ export interface TissueBuild {
   preset: TissuePreset;
 }
 
-export function buildTissue(mesh: SurfaceMesh, preset: TissuePreset, seed: number, fibrosisScale = 1): TissueBuild {
+export function buildTissue(mesh: SurfaceMesh, preset: TissuePreset, seed: number, fibrosisScale = 1, opts: { cristaBlock?: boolean } = {}): TissueBuild {
   const geom = buildGeometry(mesh.positions, mesh.indices);
   const density = fibrosisDensityField(mesh, preset.fibrosis.density * fibrosisScale, seed);
   const substrate = new Substrate(geom, {
@@ -137,7 +137,31 @@ export function buildTissue(mesh: SurfaceMesh, preset: TissuePreset, seed: numbe
     fibrosisPattern: preset.fibrosis.pattern,
     fiberDir: preset.fibrosis.pattern === 'interstitial' ? fiberField(mesh) : undefined,
   });
+  if (mesh.chamber === 'RA' && (opts.cristaBlock ?? true)) applyCristaBlock(mesh, geom, substrate);
   return { geom, substrate, preset };
+}
+
+/**
+ * Crista terminalis as a line of transverse conduction block (MODEL.md §8.2). Edges joining the
+ * crista band to its anterior (trabeculated, tricuspid-facing) side are uncoupled; the band stays
+ * coupled to the posterior venous sinus and along its own length. Returns the number of edges cut.
+ */
+export function applyCristaBlock(mesh: SurfaceMesh, geom: TissueGeometry, sub: Substrate): number {
+  const tv = mesh.anatomy?.mitral.center;
+  if (!tv) return 0;
+  const P = mesh.positions;
+  const band = (v: number) => mesh.region[v] === Region.CristaTerminalis;
+  const dTv = (v: number) => Math.hypot(P[3 * v]! - tv[0], P[3 * v + 1]! - tv[1], P[3 * v + 2]! - tv[2]);
+  let cut = 0;
+  for (let e = 0; e < geom.edgeA.length; e++) {
+    const a = geom.edgeA[e]!, b = geom.edgeB[e]!;
+    if (band(a) === band(b)) continue;
+    const inside = band(a) ? a : b, other = band(a) ? b : a;
+    const r = mesh.region[other];
+    if (r === Region.SVC || r === Region.IVC) continue;
+    if (dTv(other) < dTv(inside)) { sub.edgeScale[e] = 0; cut++; }
+  }
+  return cut;
 }
 
 export interface SinusSite {
@@ -154,6 +178,12 @@ export interface SinusSite {
  * modelled, so these sites are driven directly.
  */
 export function sinusSites(mesh: SurfaceMesh, radius = 4): SinusSite[] {
+  // Right atrium (MODEL.md §8.2): one site, the sinus node at the superior crista terminalis.
+  const ra = mesh.anatomy?.ra;
+  if (mesh.chamber === 'RA' && ra) {
+    const v = ra.sinusNode, P0 = mesh.positions;
+    return [{ name: 'Sinus node', delay: 0, vertices: verticesNear(P0, [P0[3 * v]!, P0[3 * v + 1]!, P0[3 * v + 2]!], radius) }];
+  }
   const n = mesh.region.length;
   const P = mesh.positions;
   const exclude = new Set<number>([...PV_REGIONS, Region.LAA]);

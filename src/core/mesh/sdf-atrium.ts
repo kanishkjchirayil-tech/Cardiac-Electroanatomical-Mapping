@@ -99,14 +99,14 @@ export function smin(a: number, b: number, k: number): number {
 }
 
 /** Ellipsoid distance bound (Quilez). */
-function sdEllipsoid(x: number, y: number, z: number, r: Vec3): number {
+export function sdEllipsoid(x: number, y: number, z: number, r: Vec3): number {
   const k0 = Math.hypot(x / r[0], y / r[1], z / r[2]);
   const k1 = Math.hypot(x / (r[0] * r[0]), y / (r[1] * r[1]), z / (r[2] * r[2]));
   return k1 > 0 ? (k0 * (k0 - 1)) / k1 : -Math.min(r[0], r[1], r[2]);
 }
 
 /** Tube along a+t·d, t∈[t0,t1], with radius profile r(t). Scalar, allocation-free (hot path). */
-function sdTube(px: number, py: number, pz: number, a: Vec3, d: Vec3, t0: number, t1: number, r: (t: number) => number): number {
+export function sdTube(px: number, py: number, pz: number, a: Vec3, d: Vec3, t0: number, t1: number, r: (t: number) => number): number {
   const rx = px - a[0], ry = py - a[1], rz = pz - a[2];
   const t = Math.min(t1, Math.max(t0, rx * d[0] + ry * d[1] + rz * d[2]));
   return Math.hypot(rx - d[0] * t, ry - d[1] * t, rz - d[2] * t) - r(t);

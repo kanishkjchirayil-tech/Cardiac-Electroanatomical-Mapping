@@ -4,6 +4,7 @@ import { PRESETS, sinusSites, type TissuePreset } from '../ep/tissue';
 import { verticesNear } from '../ep/stimulus';
 import { Rng } from '../rng';
 import { getV, type Vec3 } from '../math/vec3';
+import type { Chamber } from '../mesh/types';
 import { antralRing } from '../ablation/rings';
 import { MeshTools } from './geometry';
 import { edgeDijkstra } from '../mesh/geodesic';
@@ -14,9 +15,9 @@ import { edgeDijkstra } from '../mesh/geodesic';
  * case information and explicit success criteria. Ground truth never reaches the mapping code;
  * it is used by the solver, the end-of-case report and the teacher view.
  */
-export type ScenarioId = 'sinus' | 'paf' | 'persistent' | 'pmf' | 'roof' | 'focal' | 'redo';
+export type ScenarioId = 'sinus' | 'paf' | 'persistent' | 'pmf' | 'roof' | 'focal' | 'redo' | 'typical';
 
-export const SCENARIO_IDS: ScenarioId[] = ['sinus', 'paf', 'persistent', 'pmf', 'roof', 'focal', 'redo'];
+export const SCENARIO_IDS: ScenarioId[] = ['sinus', 'paf', 'persistent', 'pmf', 'roof', 'focal', 'redo', 'typical'];
 
 /** Case information shown to the learner (no ground truth). */
 export interface ScenarioPublic {
@@ -27,6 +28,8 @@ export interface ScenarioPublic {
   criteria: string[];
   /** Needs the reaction–diffusion solver (arrhythmias, pacing). */
   requiresRd: boolean;
+  /** Chamber the case is set in. */
+  chamber: Chamber;
 }
 
 /** An ectopic source: an automatic focus, or a trigger firing intermittent bursts. */
@@ -57,7 +60,7 @@ export interface ScenarioTruth {
   earliestVertex?: number;
   focusVertex?: number;
   triggerPvs?: PvName[];
-  circuit?: 'perimitral' | 'roof';
+  circuit?: 'perimitral' | 'roof' | 'cti';
   gapPv?: PvName;
   /** Centre of the gap and the positions of the missing lesions. */
   gapVertex?: number;
@@ -86,6 +89,8 @@ export interface ScenarioSetup {
   sources: SourceSpec[];
   induction: Induction[];
   truth: ScenarioTruth;
+  /** Right atrium: model the crista terminalis as a line of transverse block (default true). */
+  cristaBlock?: boolean;
 }
 
 const PRIOR = { power: 35, duration: 20, force: 15 };
@@ -98,6 +103,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Build an activation map of the LA in sinus rhythm and locate the earliest breakthrough.',
     criteria: ['LAT map covers at least 80 % of the LA surface', 'Earliest mapped activation within 10 mm of the true breakthrough'],
     requiresRd: false,
+    chamber: 'LA',
   },
   paf: {
     name: 'Paroxysmal AF — PV triggers',
@@ -105,6 +111,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Isolate all four pulmonary veins and prove it with entrance and exit block.',
     criteria: ['All four PVs isolated (durable, not edema-dependent)', 'Entrance block shown in every PV (no PV potentials on a point inside the vein)', 'Exit block shown in every PV (pacing inside the vein captures locally without conducting to the atrium)'],
     requiresRd: true,
+    chamber: 'LA',
   },
   persistent: {
     name: 'Persistent AF — remodeled substrate',
@@ -112,6 +119,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Isolate all four pulmonary veins, restore sinus rhythm (cardioversion is allowed), and review the low-voltage substrate.',
     criteria: ['All four PVs isolated (durable)', 'Sinus rhythm at the end of the case'],
     requiresRd: true,
+    chamber: 'LA',
   },
   pmf: {
     name: 'Perimitral flutter',
@@ -119,6 +127,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Diagnose the circuit (activation map, entrainment) and terminate it with a mitral isthmus line; prove block by differential pacing.',
     criteria: ['Complete mitral isthmus block (annulus connected to the PV isolation line)', 'Tachycardia terminated, sinus rhythm at the end', 'Line block demonstrated by pacing (long stimulus-to-electrogram time across the line)'],
     requiresRd: true,
+    chamber: 'LA',
   },
   roof: {
     name: 'Roof-dependent flutter',
@@ -126,6 +135,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Diagnose the circuit and terminate it with a roof line joining the two PV isolation lines; prove block by pacing.',
     criteria: ['Complete roof block (left and right PV isolation lines connected)', 'Tachycardia terminated, sinus rhythm at the end', 'Line block demonstrated by pacing (long stimulus-to-electrogram time across the line)'],
     requiresRd: true,
+    chamber: 'LA',
   },
   focal: {
     name: 'Focal atrial tachycardia',
@@ -133,6 +143,7 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Find the earliest site on the activation map and ablate the focus.',
     criteria: ['Focus eliminated (durable)', 'Sinus rhythm at the end of the case', 'Earliest mapped activation within 8 mm of the focus'],
     requiresRd: true,
+    chamber: 'LA',
   },
   redo: {
     name: 'Redo PVI — reconnection gap',
@@ -140,6 +151,15 @@ const PUBLIC: Record<ScenarioId, Omit<ScenarioPublic, 'id'>> = {
     goal: 'Find the reconnected vein and the gap, close it, and re-establish isolation of all veins.',
     criteria: ['All four PVs isolated (durable)', 'Gap in the previous lesion set closed', 'Entrance and exit block shown in the reconnected vein'],
     requiresRd: true,
+    chamber: 'LA',
+  },
+  typical: {
+    name: 'Typical atrial flutter (right atrium)',
+    presentation: 'Regular narrow-complex tachycardia at ≈ 250 ms with a saw-tooth ECG. The right atrium is mapped.',
+    goal: 'Confirm the cavotricuspid-isthmus-dependent circuit (activation map, entrainment from the isthmus) and terminate it with a CTI line; prove bidirectional block by pacing.',
+    criteria: ['Complete cavotricuspid isthmus block (tricuspid annulus connected to the IVC)', 'Tachycardia terminated, sinus rhythm at the end', 'Line block demonstrated by pacing (long stimulus-to-electrogram time across the line)'],
+    requiresRd: true,
+    chamber: 'RA',
   },
 };
 
@@ -173,6 +193,9 @@ export function buildScenario(mesh: SurfaceMesh, id: ScenarioId, seed: number): 
   if (t.circuit === 'perimitral') {
     t.criticalVertices = tools.path(tools.loop('MV'), [...ring(['LSPV', 'LIPV'])]);
     t.criticalLabel = 'mitral isthmus';
+  } else if (t.circuit === 'cti') {
+    t.criticalVertices = tools.path(tools.loop('TV'), tools.loop('IVC'));
+    t.criticalLabel = 'cavotricuspid isthmus';
   } else if (t.circuit === 'roof') {
     const top = (z: Set<number>) => [...z].filter((v) => P[3 * v + 2]! > 10);
     t.criticalVertices = tools.path(top(ring(['LSPV', 'LIPV'])), top(ring(['RSPV', 'RIPV'])));
@@ -300,6 +323,28 @@ function buildScenarioCore(mesh: SurfaceMesh, id: ScenarioId, seed: number): Sce
         sources: [{ name: 'Focus', centre, vertices: verticesNear(P, getV(P, centre), 2), mode: 'automatic', cl }],
         truth: { summary: `Automatic focus at the ${name}, cycle length ${cl} ms.`, earliestVertex: centre, focusVertex: centre },
       });
+    }
+
+    case 'typical': {
+      if (mesh.chamber !== 'RA') throw new Error('Typical flutter needs the right-atrium anatomy');
+      const setup = base({ ...PRESETS.paroxysmal, targetCv: rng.uniform(0.47, 0.55), fibrosis: { density: 0, pattern: 'patchy' } });
+      // Slow conduction in the isthmus (pectinate pouch, fibre orientation): a documented choice.
+      const cti: number[] = [];
+      mesh.region.forEach((r, i) => { if (r === Region.CTI) cti.push(i); });
+      const centre = [0, 1, 2].map((k) => cti.reduce((a, v) => a + P[3 * v + k]!, 0) / Math.max(1, cti.length)) as Vec3;
+      setup.slowZones = [{ centre, radius: rng.uniform(8, 11), conductivity: rng.uniform(0.3, 0.4) }];
+      const path = tools.path(tools.loop('TV'), tools.loop('IVC'));
+      const line = tools.dilate(path, 1);
+      const mid = path[Math.floor(path.length / 2)]!;
+      // Counterclockwise (septum ascending, the common form): stimulate the septal (+x) side. The
+      // clockwise launch does not sustain on this anatomy and is not used (MODEL.md §8.3).
+      rng.next();
+      const ccw = true;
+      const side = 1;
+      const stim = [...tools.dilate(line, 3)].filter((v) => !line.has(v) && tools.distance(v, mid) < 9 && side * (P[3 * v]! - P[3 * mid]!) > 0);
+      setup.induction = [{ kind: 'line', block: Uint32Array.from(line), stim: Uint32Array.from(stim), at: 1, release: 230 }];
+      setup.truth = { summary: `Cavotricuspid-isthmus-dependent flutter around the tricuspid annulus, ${ccw ? 'counterclockwise (septum ascending, lateral wall descending)' : 'clockwise (lateral wall ascending)'} in the LAO view.`, circuit: 'cti' };
+      return setup;
     }
 
     case 'redo': {

@@ -3,7 +3,7 @@ import { generateAtrium } from '../core/mesh/atrium';
 import { SpatialGrid } from '../core/mesh/spatial';
 import { MappingSession, type RecordedBeat } from '../core/mapping/session';
 import { Rng } from '../core/rng';
-import type { ScenarioId } from '../core/scenarios/scenarios';
+import { scenarioInfo, type ScenarioId } from '../core/scenarios/scenarios';
 import { pointRecords, DEFAULT_EGM_EXPORT, type EgmExportOptions, type PointRecord } from '../core/export/dataset';
 import type { PresetId } from '../core/ep/tissue';
 import type { CatheterType } from '../core/catheter/roving';
@@ -60,6 +60,7 @@ export interface BatchCase {
   preset: PresetId | null;
   fibrosisScale: number | null;
   anatomy: { seed: number; variability: number } | null;
+  chamber: 'LA' | 'RA';
   autonomic: { vagal: number; sympathetic: number };
   sinusCl: number;
   truth: string | null;
@@ -93,12 +94,21 @@ export async function runBatch(
 ): Promise<BatchDataset> {
   const rng = new Rng(spec.seed * 104729 + 17);
   const cases: BatchCase[] = [];
+  const otherChamber = new Map<string, SurfaceMesh>();
   for (let i = 0; i < spec.cases && !cancelled(); i++) {
     const cr = rng.fork(i);
     const seed = 1 + cr.int(0, 1_000_000);
     const scenario = spec.scenarios[cr.int(0, spec.scenarios.length)] ?? 'free';
     const anatomy = spec.anatomyVariability > 0 ? { seed: 1 + cr.int(0, 1_000_000), variability: spec.anatomyVariability } : null;
-    const mesh = anatomy ? generateAtrium({ seed: anatomy.seed, variability: anatomy.variability }).mesh : baseMesh;
+    // Each scenario runs in its own chamber; free cases use the given mesh's chamber.
+    const chamber = scenario === 'free' ? baseMesh.chamber ?? 'LA' : scenarioInfo(scenario).chamber;
+    let mesh: SurfaceMesh;
+    if (anatomy) mesh = generateAtrium({ seed: anatomy.seed, variability: anatomy.variability, chamber }).mesh;
+    else if (chamber === (baseMesh.chamber ?? 'LA')) mesh = baseMesh;
+    else {
+      if (!otherChamber.has(chamber)) otherChamber.set(chamber, generateAtrium({ chamber }).mesh);
+      mesh = otherChamber.get(chamber)!;
+    }
     const preset = scenario === 'free' ? PRESET_IDS[cr.int(0, PRESET_IDS.length)]! : null;
     const fibrosisScale = scenario === 'free' ? cr.uniform(0, 2) : null;
     const autonomic = spec.randomAutonomic ? { vagal: cr.next(), sympathetic: cr.next() } : { vagal: 0, sympathetic: 0 };
@@ -152,6 +162,7 @@ export async function runBatch(
       preset,
       fibrosisScale,
       anatomy,
+      chamber,
       autonomic,
       sinusCl: engine.effectiveSinusCl(),
       truth: report && report.type === 'report' ? report.report.truth?.summary ?? null : null,

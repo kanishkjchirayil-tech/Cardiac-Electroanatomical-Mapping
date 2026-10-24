@@ -107,9 +107,11 @@ export function evaluateCase(gt: CaseGroundTruth, map: MapSummary, lesions: Lesi
       criteria.push(sinusEnd());
       break;
     case 'pmf':
-    case 'roof': {
-      const line = gt.scenario.id === 'pmf' ? gt.mitralBlock : gt.roofBlock;
-      const name = gt.scenario.id === 'pmf' ? 'mitral isthmus' : 'roof';
+    case 'roof':
+    case 'typical': {
+      const id = gt.scenario.id;
+      const line = id === 'pmf' ? gt.mitralBlock : id === 'roof' ? gt.roofBlock : gt.ctiBlock;
+      const name = id === 'pmf' ? 'mitral isthmus' : id === 'roof' ? 'roof' : 'cavotricuspid isthmus';
       criteria.push({ label: `Complete ${name} block`, passed: line.durable, detail: line.durable ? 'The line joins its anatomical anchors with no conducting gap.' : line.now ? 'Blocked now, but only because of edema.' : 'The line has a conducting gap or does not reach its anchors.' });
       criteria.push({ ...sinusEnd(), label: 'Tachycardia terminated, sinus rhythm at the end' });
       criteria.push({ label: 'Line block demonstrated by pacing', passed: lineShown(), detail: lineShown() ? 'A pacing manoeuvre after the line shows the detour around it.' : `Pace after completing the line: a stimulus-to-electrogram time ≥ ${EVIDENCE.lineBlockMs} ms to a bipole within ${EVIDENCE.lineBlockMm} mm, or a paced activation map (≥ ${EVIDENCE.pacedMapPoints} points).` });

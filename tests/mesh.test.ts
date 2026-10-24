@@ -58,7 +58,9 @@ describe('procedural left atrium', () => {
   it('labels every vertex and contains every anatomical segment', () => {
     expect(mesh.region.every((r) => r !== Region.Unlabeled)).toBe(true);
     const present = new Set(mesh.region);
-    for (const r of REGIONS) if (r.id !== Region.Unlabeled) expect(present.has(r.id), r.name).toBe(true);
+    // Left-atrial segments only (ids below RAFreeWall belong to the LA).
+    for (const r of REGIONS) if (r.id !== Region.Unlabeled && r.id < Region.RAFreeWall) expect(present.has(r.id), r.name).toBe(true);
+    expect([...present].every((r) => r < Region.RAFreeWall)).toBe(true);
   });
 
   it('places segments in anatomically plausible positions (LPS frame)', () => {

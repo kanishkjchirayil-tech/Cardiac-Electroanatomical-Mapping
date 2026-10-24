@@ -18,6 +18,8 @@ export interface EsophagusModel {
 }
 
 export function buildEsophagus(mesh: SurfaceMesh, seed = 1): EsophagusModel {
+  // The esophagus lies behind the LA; the RA chamber has no esophageal zone.
+  if (mesh.chamber === 'RA') return { path: [], radius: 0, zone: new Uint8Array(mesh.region.length) };
   const rx = mesh.anatomy?.bodyRadii[0] ?? 35;
   const rng = new Rng(seed ^ 0x350);
   const xc = (0.12 + rng.uniform(-0.08, 0.08)) * rx;

@@ -25,7 +25,7 @@ import { vToMv } from '../core/ep/ionic';
 import { REGIONS, Region } from '../core/mesh/regions';
 import { formatFromName, importMesh, parseMeshFile, type LabelSidecar } from '../core/mesh/io/import';
 import { meshQuality } from '../core/mesh/quality';
-import { loadProceduralAtrium } from './mesh-service';
+import { generate } from './anatomy';
 import { Logo } from './Logo';
 import * as S from './state';
 
@@ -105,25 +105,6 @@ function colorsFor(): Float32Array | null {
       if (mapBuf.length !== 3 * m.region.length) mapBuf = new Float32Array(3 * m.region.length);
       return mapColors(currentMap, mapBuf, currentMap.type === 'propagation' ? propagationPhase.value : undefined);
     }
-  }
-}
-
-async function generate(): Promise<void> {
-  S.errorMsg.value = null;
-  S.loading.value = { stage: 'starting', fraction: 0 };
-  try {
-    const r = await loadProceduralAtrium(
-      { seed: S.genSeed.value, variability: S.genVariability.value },
-      (stage, fraction) => (S.loading.value = { stage, fraction }),
-    );
-    S.importWarnings.value = [];
-    S.quality.value = r.quality;
-    S.meshSource.value = `Procedural LA · seed ${S.genSeed.value} · variability ${S.genVariability.value}${r.fromCache ? ' (cached)' : ''}`;
-    S.mesh.value = r.mesh;
-  } catch (e) {
-    S.errorMsg.value = `Mesh generation failed: ${e instanceof Error ? e.message : String(e)}`;
-  } finally {
-    S.loading.value = null;
   }
 }
 
@@ -355,6 +336,13 @@ function Panel({ title, children }: { title: string; children: preact.ComponentC
 function AnatomyPanel() {
   return (
     <Panel title="Anatomy">
+      <div class="segmented" role="radiogroup" aria-label="Chamber">
+        {(['LA', 'RA'] as const).map((ch) => (
+          <button key={ch} id={`chamber-${ch}`} role="radio" aria-checked={S.genChamber.value === ch} class={S.genChamber.value === ch ? 'on' : ''} onClick={() => (S.genChamber.value = ch)}>
+            {ch === 'LA' ? 'Left atrium' : 'Right atrium'}
+          </button>
+        ))}
+      </div>
       <div class="row">
         <label>Seed <input type="number" value={S.genSeed.value} onInput={(e) => (S.genSeed.value = Number(e.currentTarget.value) | 0)} /></label>
         <label>Variability
@@ -362,7 +350,7 @@ function AnatomyPanel() {
             onInput={(e) => (S.genVariability.value = Math.max(0, Math.min(2, Number(e.currentTarget.value))))} />
         </label>
       </div>
-      <button class="primary" disabled={!!S.loading.value} onClick={() => void generate()}>Generate procedural LA</button>
+      <button class="primary" disabled={!!S.loading.value} onClick={() => void generate()}>Generate procedural {S.genChamber.value}</button>
       <label class="file">
         Import mesh (.obj/.ply/.vtk + labels .json)
         <input type="file" multiple accept=".obj,.ply,.vtk,.json"

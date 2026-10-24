@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SCENARIO_IDS, buildScenario, type ScenarioId } from '../src/core/scenarios/scenarios';
+import { SCENARIO_IDS, buildScenario, scenarioInfo, type ScenarioId } from '../src/core/scenarios/scenarios';
 import { MeshTools } from '../src/core/scenarios/geometry';
 import { buildTissue, sinusSites } from '../src/core/ep/tissue';
 import { AblationController, DEFAULT_ABLATION, applyLesionsToSubstrate } from '../src/core/ablation/controller';
@@ -44,7 +44,7 @@ function along(tools: MeshTools, path: number[], spacing = 4): number[] {
 describe('scenario ground truth', () => {
   it('every scenario builds deterministically from its seed and varies between seeds', () => {
     const { mesh } = defaultAtrium();
-    for (const id of SCENARIO_IDS) {
+    for (const id of SCENARIO_IDS.filter((x) => scenarioInfo(x).chamber === 'LA')) {
       const a = buildScenario(mesh, id, 3), b = buildScenario(mesh, id, 3);
       expect(a.truth).toEqual(b.truth);
       expect(a.sinusCl).toBe(b.sinusCl);

@@ -75,9 +75,15 @@ export function ReportModal() {
           <section>
             <h3>Block (ground truth)</h3>
             <dl class="stats">
-              {gt.pv.map((p) => <><dt key={p.pv}>{p.pv}</dt><dd>{p.durable ? 'isolated' : p.isolated ? 'isolated (edema only)' : `connected (${(100 * p.connected).toFixed(0)} %)`}</dd></>)}
-              <dt>Mitral isthmus</dt><dd>{gt.mitralBlock.durable ? 'blocked' : gt.mitralBlock.now ? 'blocked (edema)' : 'conducting'}</dd>
-              <dt>Roof</dt><dd>{gt.roofBlock.durable ? 'blocked' : gt.roofBlock.now ? 'blocked (edema)' : 'conducting'}</dd>
+              {gt.chamber === 'RA' ? (
+                <><dt>Cavotricuspid isthmus</dt><dd>{gt.ctiBlock.durable ? 'blocked' : gt.ctiBlock.now ? 'blocked (edema)' : 'conducting'}</dd></>
+              ) : (
+                <>
+                  {gt.pv.map((p) => <><dt key={p.pv}>{p.pv}</dt><dd>{p.durable ? 'isolated' : p.isolated ? 'isolated (edema only)' : `connected (${(100 * p.connected).toFixed(0)} %)`}</dd></>)}
+                  <dt>Mitral isthmus</dt><dd>{gt.mitralBlock.durable ? 'blocked' : gt.mitralBlock.now ? 'blocked (edema)' : 'conducting'}</dd>
+                  <dt>Roof</dt><dd>{gt.roofBlock.durable ? 'blocked' : gt.roofBlock.now ? 'blocked (edema)' : 'conducting'}</dd>
+                </>
+              )}
               <dt>Rhythm now</dt><dd>{gt.rhythm === 'sinus' ? 'sinus' : 'not sinus'}</dd>
             </dl>
           </section>

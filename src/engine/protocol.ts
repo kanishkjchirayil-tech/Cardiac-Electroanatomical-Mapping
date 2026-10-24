@@ -126,6 +126,9 @@ export interface CaseGroundTruth {
   pv: Array<{ pv: PvName; isolated: boolean; durable: boolean; connected: number }>;
   mitralBlock: { now: boolean; durable: boolean };
   roofBlock: { now: boolean; durable: boolean };
+  /** Right atrium: tricuspid annulus joined to the IVC by a line of block. */
+  ctiBlock: { now: boolean; durable: boolean };
+  chamber: 'LA' | 'RA';
   sources: Array<{ name: string; eliminated: boolean; isolated: boolean }>;
   gapClosed: boolean | null;
   rhythm: 'sinus' | 'not-sinus';

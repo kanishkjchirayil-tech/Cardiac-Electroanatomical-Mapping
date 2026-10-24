@@ -1,14 +1,18 @@
 import { dot, sub, type Vec3 } from '../math/vec3';
 import { DynMesh, isotropicRemesh, type RemeshTarget } from './remesh';
-import { AtriumShape, DEFAULT_ATRIUM, jitterAtrium, type AtriumParams } from './sdf-atrium';
+import { AtriumShape, DEFAULT_ATRIUM, jitterAtrium, type AtriumParams, type CutPlane } from './sdf-atrium';
+import { DEFAULT_RA, RaShape, jitterRa } from './sdf-ra';
+import { labelRightAtrium } from './labels-ra';
 import { surfaceNets } from './surface-nets';
 import { boundaryLoops, computeVertexNormals, vertexAdjacency } from './topology';
 import { labelAtrium, type LabelOptions } from './labels';
 import { assignWallThickness, type ThicknessOptions } from './thickness';
-import type { SurfaceMesh } from './types';
+import type { Chamber, SurfaceMesh } from './types';
 import { meshQuality, type MeshQuality } from './quality';
 
 export interface AtriumGenOptions {
+  /** Which chamber to build (default LA; RA is the stretch goal, MODEL.md §8). */
+  chamber?: Chamber;
   /** Anatomy shape parameters (defaults: DEFAULT_ATRIUM). */
   shape?: AtriumParams;
   /** Seed for anatomical variation and wall-thickness noise. */
@@ -27,7 +31,7 @@ export interface AtriumGenOptions {
 
 export interface AtriumGenResult {
   mesh: SurfaceMesh;
-  shape: AtriumShape;
+  shape: AtriumShape | RaShape;
   quality: MeshQuality;
   timingsMs: Record<string, number>;
 }
@@ -36,8 +40,8 @@ export const DEFAULT_TARGET_EDGE = 0.95;
 
 export function generateAtrium(opts: AtriumGenOptions = {}): AtriumGenResult {
   const seed = opts.seed ?? 1;
-  const params = jitterAtrium(opts.shape ?? DEFAULT_ATRIUM, seed, opts.variability ?? 0);
-  const shape = new AtriumShape(params);
+  const chamber = opts.chamber ?? 'LA';
+  const shape = chamber === 'RA' ? new RaShape(jitterRa(DEFAULT_RA, seed, opts.variability ?? 0)) : new AtriumShape(jitterAtrium(opts.shape ?? DEFAULT_ATRIUM, seed, opts.variability ?? 0));
   const timings: Record<string, number> = {};
   const progress = opts.onProgress ?? (() => {});
   let t0 = performance.now();
@@ -83,7 +87,7 @@ export function generateAtrium(opts: AtriumGenOptions = {}): AtriumGenResult {
   const order = shape.cuts.map((c) => c.label);
   loops.sort((x, y) => order.indexOf(x.label) - order.indexOf(y.label));
 
-  const labels = labelAtrium(arr.positions, arr.indices, adj, loops, shape, opts.labels);
+  const labels = shape instanceof RaShape ? labelRightAtrium(arr.positions, adj, loops, shape) : labelAtrium(arr.positions, arr.indices, adj, loops, shape, opts.labels);
   lap('label');
   const wallThickness = assignWallThickness(arr.positions, adj, labels.region, labels.veinDepth, seed, opts.thickness);
   lap('thickness');
@@ -96,6 +100,7 @@ export function generateAtrium(opts: AtriumGenOptions = {}): AtriumGenResult {
     wallThickness,
     boundaryLoops: loops,
     anatomy: labels.landmarks,
+    chamber,
   };
   const quality = meshQuality(arr.positions, arr.indices);
   lap('quality');
@@ -107,7 +112,14 @@ export function generateAtrium(opts: AtriumGenOptions = {}): AtriumGenResult {
  * Remove the closed tube ends beyond each cut plane, clean up non-manifold leftovers,
  * keep the largest component and snap boundary vertices onto the exact cut curves.
  */
-export function cutOpenings(m: DynMesh, shape: AtriumShape): void {
+/** What cutting and remeshing need from an implicit chamber shape. */
+export interface CutShape {
+  cuts: CutPlane[];
+  beyondCut(p: Vec3, c: number): number;
+  projectToCut(p: Vec3, c: number): Vec3;
+}
+
+export function cutOpenings(m: DynMesh, shape: CutShape): void {
   const centroid = (t: number): Vec3 => {
     const [a, b, c] = m.tri(t);
     const pa = m.pos(a), pb = m.pos(b), pc = m.pos(c);

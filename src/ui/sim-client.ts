@@ -7,7 +7,8 @@ import type { RovingConfig } from '../core/catheter/roving';
 import type { SignalSettings } from '../core/signals/recording';
 import type { AblationSettings } from '../core/ablation/controller';
 import type { PacingRequest } from '../core/pacing/protocols';
-import type { ScenarioId } from '../core/scenarios/scenarios';
+import { scenarioInfo, type ScenarioId } from '../core/scenarios/scenarios';
+import { generate } from './anatomy';
 import type { AutonomicSettings } from '../core/ep/autonomic';
 import type { GroundTruthLabels } from '../core/export/labels';
 import type { BatchDataset, BatchSpec } from '../engine/batch';
@@ -192,11 +193,20 @@ export const pace = (request: PacingRequest) => {
 export const paceStop = () => send({ type: 'paceStop' });
 export const cardiovert = () => send({ type: 'cardiovert' });
 export const requestReport = () => send({ type: 'requestReport' });
-/** Start a scenario case (or return to free simulation). */
-export const startCase = (id: ScenarioId | 'free', seed: number) => {
+/** Start a scenario case (or return to free simulation), switching chamber if the case needs it. */
+export const startCase = async (id: ScenarioId | 'free', seed: number) => {
   S.lastPacing.value = null;
   S.caseReport.value = null;
-  configure({ scenario: id === 'free' ? null : { id, seed, run: Date.now() } });
+  const scenario = id === 'free' ? null : { id, seed, run: Date.now() };
+  const chamber = id === 'free' ? null : scenarioInfo(id).chamber;
+  if (chamber && chamber !== (S.mesh.peek()?.chamber ?? 'LA')) {
+    // A new mesh re-initializes the simulation with this config (see App's mesh effect).
+    S.genChamber.value = chamber;
+    S.simConfig.value = { ...S.simConfig.peek(), scenario };
+    await generate();
+    return;
+  }
+  configure({ scenario });
   M.initMapping(S.mesh.peek()!);
 };
 

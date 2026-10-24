@@ -94,7 +94,7 @@ export class CaseController {
       // (it is then reset, i.e. suppressed, by the tachycardia).
       if (setup.induction.some((i) => i.kind === 'line')) this.sinus.restart(600);
     }
-    if (siteIndex.ectopy >= 0 && h.mesh.anatomy) {
+    if (siteIndex.ectopy >= 0 && h.mesh.anatomy?.pvs.length) {
       const er = rng.fork(99);
       const foci = PV_NAMES.map((pv) => ({ pv, ...pvSleeveFocus(h.mesh, pv, er), draw: er.next() }));
       this.latent = new LatentEctopyDriver(h.sim, siteIndex.ectopy, foci, er.fork(1));
@@ -426,6 +426,7 @@ export function caseGroundTruth(
       pv: PV_NAMES.map((p) => pvConnectedFraction(mesh, body, exc, p)),
       mitral: c('MV') >= 0 && pvComp.includes(c('MV')),
       roof: [c('LSPV'), c('LIPV')].some((x) => x >= 0 && (x === c('RSPV') || x === c('RIPV'))),
+      cti: c('TV') >= 0 && c('TV') === c('IVC'),
       sources: extra.sources.map((s) => {
         let n = 0;
         for (const v of s.vertices) n += core[v]!;
@@ -447,6 +448,8 @@ export function caseGroundTruth(
     pv: PV_NAMES.map((pv, k) => ({ pv, connected: cur.pv[k]!, isolated: cur.pv[k] === 0, durable: dur.pv[k] === 0 })),
     mitralBlock: { now: cur.mitral, durable: dur.mitral },
     roofBlock: { now: cur.roof, durable: dur.roof },
+    ctiBlock: { now: cur.cti, durable: dur.cti },
+    chamber: mesh.chamber ?? 'LA',
     sources: cur.sources.map((s, k) => ({ ...s, eliminated: dur.sources[k]!.eliminated, isolated: dur.sources[k]!.isolated })),
     gapClosed: gapMid ? user.some((l) => Math.hypot(l.center[0] - gapMid[0]!, l.center[1] - gapMid[1]!, l.center[2] - gapMid[2]!) < 6) : null,
     rhythm: extra.rhythm,

@@ -29,7 +29,7 @@ export const DEFAULT_THICKNESS: ThicknessOptions = {
   sleeveTaperLength: 25,
   sleeveMinFactor: 0.6,
   min: 0.5,
-  max: 4,
+  max: 6,
 };
 
 /** Per-vertex wall thickness (mm). See MODEL.md §1.4. */

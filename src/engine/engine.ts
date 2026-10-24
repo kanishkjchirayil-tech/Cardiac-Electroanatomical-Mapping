@@ -22,7 +22,7 @@ import type { RfFrame } from './protocol';
 import { DEFAULT_AUTONOMIC, autonomicApdScale, buildGpZones, gpDensity, gpEfficacy, sinusClFactor, type AutonomicSettings, type GpZone } from '../core/ep/autonomic';
 import { MAX_STIM_SITES } from '../core/ep/stimulus';
 import { buildLabels, type GroundTruthLabels } from '../core/export/labels';
-import { buildScenario, type ScenarioSetup } from '../core/scenarios/scenarios';
+import { buildScenario, scenarioInfo, type ScenarioSetup } from '../core/scenarios/scenarios';
 import type { PacingRequest } from '../core/pacing/protocols';
 import { CaseController, caseGroundTruth, type CaseHost } from './case';
 
@@ -119,6 +119,11 @@ export class SimEngine {
     const gen = ++this.generation;
     const t0 = performance.now();
     const c = this.config;
+    // A case set in the other chamber cannot run on this mesh: fall back to free simulation.
+    if (c.scenario && scenarioInfo(c.scenario.id).chamber !== (this.mesh.chamber ?? 'LA')) {
+      this.post({ type: 'status', message: `${scenarioInfo(c.scenario.id).name} needs the ${scenarioInfo(c.scenario.id).chamber} anatomy` });
+      c.scenario = null;
+    }
     const key = c.scenario ? `${c.scenario.id}:${c.scenario.seed}:${c.scenario.run ?? 0}` : '';
     if (key !== this.scenarioKey) {
       this.scenarioKey = key;
@@ -134,7 +139,7 @@ export class SimEngine {
     const model = createIonicModel(this.ionic);
     this.post({ type: 'status', message: 'Building tissue…' });
     this.tissue = sc
-      ? buildTissue(this.mesh, preset, sc.seed, sc.fibrosisScale)
+      ? buildTissue(this.mesh, preset, sc.seed, sc.fibrosisScale, { cristaBlock: sc.cristaBlock ?? true })
       : buildTissue(this.mesh, { ...preset, fibrosis: { ...preset.fibrosis, pattern: c.fibrosisPattern } }, c.seed, c.fibrosisScale);
     for (const z of sc?.slowZones ?? []) {
       const P = this.mesh.positions, cond = this.tissue.substrate.conductivity;
@@ -239,6 +244,11 @@ export class SimEngine {
   /** Electrodes, lead fields and recording system for the current tissue. */
   private buildRig(): void {
     const mesh = this.mesh!;
+    // In the RA only the proximal CS bipole lies in the chamber (at the CS ostium).
+    if (mesh.chamber === 'RA' && this.refName !== 'CS 9-10') {
+      this.refName = 'CS 9-10';
+      this.post({ type: 'reference', name: this.refName });
+    }
     this.rig = new ElectrogramRig(mesh, this.sourceOptions(), this.config.seed, this.signals);
     this.rig.motionEnabled = this.motionEnabled;
     if (this.rovingVertex < 0 || this.rovingVertex >= mesh.region.length) this.rovingVertex = defaultRovingVertex(mesh);
@@ -280,13 +290,15 @@ export class SimEngine {
     const site = this.sites.find((x) => x.name === 'Fossa ovalis') ?? this.sites[0];
     const P = this.mesh!.positions, N = this.mesh!.normals;
     const v = site ? site.vertices[0]! : 0;
+    const ra = this.mesh!.chamber === 'RA' ? this.mesh!.anatomy?.ra : undefined;
     return {
       channels: r.channels.filter((c) => c.display),
       fs: EGM_FS,
       csPath: r.cs.path.flat(),
       csElectrodes: r.cs.electrodes.flat(),
       // Entry point 3 mm inside the septal wall at the fossa.
-      transseptal: [0, 1, 2].map((k) => P[3 * v + k]! - 3 * N[3 * v + k]!),
+      // LA: entry 3 mm inside the septal wall at the fossa. RA: the catheter comes up the IVC.
+      transseptal: ra ? [0, 1, 2].map((k) => ra.ivc.center[k]! + 20 * ra.ivc.axis[k]!) : [0, 1, 2].map((k) => P[3 * v + k]! - 3 * N[3 * v + k]!),
       esophagus: { path: this.esophagus?.path.flat() ?? [], radius: this.esophagus?.radius ?? 0 },
     };
   }
@@ -995,17 +1007,18 @@ export class SimEngine {
 /** Default roving position: the lateral-wall vertex closest to that region's centroid. */
 function defaultRovingVertex(mesh: SurfaceMesh): number {
   const P = mesh.positions;
+  const target = mesh.chamber === 'RA' ? Region.RAFreeWall : Region.Lateral;
   const c = [0, 0, 0];
   let n = 0;
   mesh.region.forEach((r, i) => {
-    if (r !== Region.Lateral) return;
+    if (r !== target) return;
     for (let k = 0; k < 3; k++) c[k]! += P[3 * i + k]!;
     n++;
   });
   if (!n) return 0;
   let best = 0, bd = Infinity;
   mesh.region.forEach((r, i) => {
-    if (r !== Region.Lateral) return;
+    if (r !== target) return;
     const d = (P[3 * i]! - c[0]! / n) ** 2 + (P[3 * i + 1]! - c[1]! / n) ** 2 + (P[3 * i + 2]! - c[2]! / n) ** 2;
     if (d < bd) { bd = d; best = i; }
   });

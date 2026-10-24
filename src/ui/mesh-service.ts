@@ -4,7 +4,7 @@ import { meshQuality, type MeshQuality } from '../core/mesh/quality';
 import type { MeshWorkerRequest, MeshWorkerResponse } from '../workers/mesh.worker';
 
 /** Bump when the generator's output changes so stale cached meshes are ignored. */
-export const GENERATOR_VERSION = 1;
+export const GENERATOR_VERSION = 2;
 
 type GenOptions = Omit<AtriumGenOptions, 'onProgress'>;
 

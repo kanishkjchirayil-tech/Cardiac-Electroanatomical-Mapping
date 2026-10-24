@@ -21,9 +21,20 @@ export enum Region {
   LAA = 15,
   MitralAnnulus = 16,
   MitralIsthmus = 17,
+  // Right atrium (stretch goal; MODEL.md §8).
+  RAFreeWall = 18,
+  RAPosterior = 19,
+  RASeptum = 20,
+  CristaTerminalis = 21,
+  CTI = 22,
+  SVC = 23,
+  IVC = 24,
+  RAA = 25,
+  TricuspidAnnulus = 26,
+  CSOstium = 27,
 }
 
-export const REGION_COUNT = 18;
+export const REGION_COUNT = 28;
 
 export interface RegionInfo {
   id: Region;
@@ -54,6 +65,16 @@ export const REGIONS: readonly RegionInfo[] = [
   { id: Region.LAA, key: 'laa', name: 'LA appendage', color: [0.60, 0.40, 0.25], thickness: 1.2 },
   { id: Region.MitralAnnulus, key: 'mitral_annulus', name: 'Mitral annulus', color: [0.42, 0.42, 0.50], thickness: 2.6 },
   { id: Region.MitralIsthmus, key: 'mitral_isthmus', name: 'Mitral isthmus', color: [0.80, 0.30, 0.65], thickness: 2.4 },
+  { id: Region.RAFreeWall, key: 'ra_free_wall', name: 'RA free wall (trabeculated)', color: [0.86, 0.66, 0.56], thickness: 2.0 },
+  { id: Region.RAPosterior, key: 'ra_posterior', name: 'RA posterior (venous sinus)', color: [0.60, 0.78, 0.58], thickness: 2.0 },
+  { id: Region.RASeptum, key: 'ra_septum', name: 'RA septum', color: [0.74, 0.58, 0.86], thickness: 2.2 },
+  { id: Region.CristaTerminalis, key: 'crista_terminalis', name: 'Crista terminalis', color: [0.95, 0.78, 0.30], thickness: 4.5 },
+  { id: Region.CTI, key: 'cti', name: 'Cavotricuspid isthmus', color: [0.85, 0.28, 0.62], thickness: 3.5 },
+  { id: Region.SVC, key: 'svc', name: 'SVC', color: [0.18, 0.46, 0.80], thickness: 1.2 },
+  { id: Region.IVC, key: 'ivc', name: 'IVC', color: [0.12, 0.60, 0.62], thickness: 1.2 },
+  { id: Region.RAA, key: 'raa', name: 'RA appendage', color: [0.62, 0.42, 0.26], thickness: 1.6 },
+  { id: Region.TricuspidAnnulus, key: 'tricuspid_annulus', name: 'Tricuspid annulus', color: [0.42, 0.42, 0.50], thickness: 3.0 },
+  { id: Region.CSOstium, key: 'cs_ostium', name: 'CS ostium', color: [0.92, 0.50, 0.20], thickness: 2.0 },
 ];
 
 export const PV_REGIONS = [Region.LSPV, Region.LIPV, Region.RSPV, Region.RIPV] as const;
