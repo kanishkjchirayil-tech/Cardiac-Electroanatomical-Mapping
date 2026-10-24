@@ -7,6 +7,8 @@ import { AblationPanel } from './AblationPanel';
 import { PacingPanel } from './PacingPanel';
 import { ScenarioPanel } from './ScenarioPanel';
 import { ReportModal } from './ReportModal';
+import { AutonomicPanel } from './AutonomicPanel';
+import { ExportPanel } from './ExportPanel';
 import { lesionGaps } from '../core/ablation/lesion';
 import { initSimulation, latestVm } from './sim-client';
 import { SimPanel } from './SimPanel';
@@ -74,6 +76,13 @@ function teacherColors(n: number): Float32Array | null {
       const kind = S.lesionKind.value ?? a.lesion;
       const zone = S.esophagealZone.value;
       writeColors(out, n, (i): RGB => (kind[i] === 2 ? LESION_CORE : kind[i] === 1 ? LESION_BORDER : a.fibrotic[i] ? FIBROTIC : zone?.[i] ? ESOPHAGEAL_ZONE : SHELL_COLOR));
+      return out;
+    }
+    case 'autonomic': {
+      const d = S.autonomicState.value?.density;
+      if (!d || d.length !== n) return null;
+      const kind = S.lesionKind.value;
+      writeColors(out, n, (i): RGB => (kind?.[i] === 2 ? LESION_CORE : d[i]! > 0.02 ? viridis(d[i]!) : SHELL_COLOR));
       return out;
     }
   }
@@ -303,6 +312,8 @@ export function App() {
         <MappingPanel />
         <AblationPanel />
         <PacingPanel />
+        <AutonomicPanel />
+        <ExportPanel />
         <SignalsPanel />
         <AnatomyPanel />
         <DisplayPanel />
@@ -485,6 +496,17 @@ function Legend() {
           <div class="bar" style={{ background: cssGradient(latColor) }} />
           <div class="bar-labels"><span>{r ? '0 ms' : '—'}</span><span>{r ? `${(r.hi - r.lo).toFixed(0)} ms` : 'run the simulation'}</span></div>
           <div class="legend-note"><span class="swatch" style={{ background: 'rgb(56,56,61)' }} /> fibrotic / inexcitable</div>
+        </details>
+      );
+    }
+    if (ov === 'autonomic') {
+      const st = S.autonomicState.value;
+      return (
+        <details class="legend teacher-legend" open>
+          <summary class="legend-title">Teacher · GP innervation (phenomenological)</summary>
+          <div class="bar" style={{ background: cssGradient(viridis) }} />
+          <div class="bar-labels"><span>0</span><span>1</span></div>
+          {st?.gps.map((g) => <div key={g.name} class="legend-note">{g.name}: {(100 * g.efficacy).toFixed(0)} % intact</div>)}
         </details>
       );
     }

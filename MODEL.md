@@ -12,7 +12,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 - [4. Mapping](#4-mapping) — implemented (M4)
 - [5. Ablation](#5-ablation) — implemented (M5)
 - [6. Pacing and scenarios](#6-pacing-and-scenarios) — implemented (M6)
-- [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — *(planned, M7)*
+- [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — implemented (M7)
 - [Known limitations](#known-limitations)
 - [References](#references)
 
@@ -1097,7 +1097,182 @@ not modelled.
   - Persistent AF: sustained and irregular for 3 s; cardioversion restores sinus.
 
 ## 7. Autonomic module and dataset export
-*(planned, M7.)*
+
+### 7.1 Autonomic tone (phenomenological)
+
+Code: `src/core/ep/autonomic.ts`. Latent foci and trigger modulation are in `src/engine/drivers.ts`.
+
+This module is **phenomenological**. It has no neurotransmitter release, receptor kinetics or
+ion-channel modulation. Tone acts only through the documented scaling rules below, which mimic the
+direction and rough size of reported effects. Two sliders set vagal tone v and sympathetic tone s,
+each 0–1.
+
+**Ganglionated plexi.** Four zones model the major LA plexi [48]:
+
+| Plexus | Location |
+|---|---|
+| Superior left | above the LSPV antrum |
+| Inferior left | below the LIPV |
+| Anterior right | in front of the RSPV |
+| Inferior right | below the RIPV |
+
+- **Centre:** the antral vertex 6–12 mm (edge-path distance) outside the vein's ostium that lies
+  furthest in the plexus direction. The direction gets a seeded jitter of ±0.25 per component.
+- **Weight:** a Gaussian of Euclidean distance, σ = 5–8 mm (seeded), truncated at 3σ.
+- **Strength:** 0.7–1.3 (seeded).
+- **GP density:** W_i = max over GPs of min(1, strength × efficacy × weight).
+
+**Vagal tone.** Vagal tone shortens refractoriness, through acetylcholine-activated K⁺ current in
+reality and through the scaling on τ_close here [49]. The APD scale (the multiplier on τ_close,
+§2.2) becomes:
+
+  uniform:        apdScale × (1 − 0.25·v)
+  heterogeneous:  apdScale × (1 − v·(0.12 + 0.40·W_i))      (default; never below 0.5×)
+
+So at full vagal tone the APD shortens by ≈ 12 % far from the plexi and by up to ≈ 50 % at their
+centres. This creates the refractoriness heterogeneity that favours vagal AF [49].
+
+- **Measured** (reaction–diffusion, healthy tissue, one sinus beat, v = 1, heterogeneous):
+  APD90 falls to < 75 % of baseline at a GP centre and stays > 82 % far from the plexi.
+
+**Sinus rate:**
+
+  CL_eff = CL × (1 + 0.5·v) / (1 + 0.6·s)
+
+For example, 800 ms becomes 1200 ms at full vagal tone and 500 ms at full sympathetic tone.
+
+**Sympathetic tone and PV ectopy** [50, 51]:
+
+- **Latent foci.** Every case has a latent focus in each PV sleeve, 4–8 mm into the vein (seeded),
+  with a seeded draw u_v.
+  - A focus is **armed** when u_v < s, so higher tone arms more veins.
+  - Armed foci fire 1–3-beat bursts at 220–300 ms, as a Poisson process of rate 0.08·s per second
+    per vein. A 400 ms dead time follows each burst.
+  - All latent foci share one stimulus site; its vertices are switched to the firing vein before
+    each burst.
+- **Scenario triggers** (§6.1) fire more often under sympathetic tone: the interval is divided by
+  (1 + 2s), and runs gain round(3s) beats.
+- Ectopy needs the reaction–diffusion engine.
+
+**GP ablation** [52]. A GP's efficacy is 1 − min(1, 1.5 × the weight-averaged fraction of its zone
+covered by lesions, core or border). Efficacy multiplies that GP's contribution to W_i, so ablating
+inside a plexus removes its extra vagal APD shortening. The teacher view (**GP zones**) shows W_i
+and each GP's remaining efficacy.
+
+### 7.2 Dataset export
+
+Code: `src/core/export/` (`dataset.ts`, `labels.ts`).
+
+**Points** can be exported as CSV (one row per point) or JSON (`ostium-points/1`). Each point
+includes:
+
+- **Position and identity:** xyz of the electrode at acquisition (mm, LPS), and the outward vertex
+  normal at the projected vertex (normals point out of the blood pool, §1.1).
+- **Projection:** vertex, projection distance, and region key.
+- **Catheter:** catheter type and electrode.
+- **Annotation:** LAT, method, bipolar and unipolar amplitude, deflections, fractionation and
+  double-potential flags.
+- **Acquisition:** contact force, stability and position SD, CL, excluded flag, tags, and the
+  timestamp (simulated ms).
+- **Raw EGM windows:** unipolar, bipolar and reference.
+  - **Length:** configurable, 0–350 ms before and 10–350 ms after the reference.
+  - **Rate:** 2 kHz as recorded, or 1 kHz. 1 kHz uses a two-sample boxcar and then decimation.
+    Bipolar channels are already low-passed at 500 Hz (§3.3), so the boxcar's attenuation near
+    Nyquist is the main distortion.
+  - **CSV form:** three columns of space-separated samples, in mV.
+
+**Ground-truth labels** (optional, on by default) come from the hidden simulation state. They are
+added to exports only and never feed the maps (the mapping firewall test, §4.6, still holds):
+
+| Label | Values |
+|---|---|
+| Fibrosis density | 0–1, plus the realized fibrotic-node flag |
+| Fibrosis depth class | none / endocardial / mid-wall / transmural, from the transmural extent (< ⅓, < ⅔, ≥ ⅔ of the wall) where density > 0 |
+| Lesion status | none / partial (border or partial thickness) / core, from the current raster (edema counts while active) |
+| Autonomic zone | GP name where its weight ≥ 0.3, otherwise "none"; plus GP density W_i after ablation |
+| Distance to the critical site | edge-path (geodesic) distance, mm |
+
+The critical site depends on the scenario:
+
+| Scenario | Critical site |
+|---|---|
+| Perimitral flutter | mitral isthmus (annulus to left PV ring) |
+| Roof flutter | roof isthmus between the rings |
+| Focal AT | focus |
+| Paroxysmal AF | PV triggers |
+| Redo | reconnection gap |
+| Sinus | sinus breakthrough |
+| Free simulation, persistent AF | none |
+
+Where there is no critical site, the distance is empty in CSV and `null` in JSON.
+
+**Meshes** can be exported as binary PLY or legacy ASCII VTK. Per-vertex fields:
+
+- `region` and `wall_thickness`;
+- the interpolated maps `map_lat`, `map_bipolar`, `map_unipolar` and `map_fractionation` (when
+  points exist);
+- with labels on: `gt_fibrosis_density`, `gt_fibrosis_depth_class`, `gt_lesion_status`,
+  `gt_autonomic_zone`, `gt_gp_density` and `gt_critical_distance`.
+
+Unmapped values are NaN in PLY and −9999 in VTK, because legacy ASCII readers do not parse NaN.
+
+### 7.3 Headless batch mode
+
+Code: `src/engine/batch.ts`, run in `src/workers/batch.worker.ts`. The batch runs off the main
+thread and needs no UI.
+
+**Spec:**
+
+- number of cases and base seed;
+- scenarios to draw from (including "free": a random tissue preset, fibrosis × 0–2, sinus rhythm);
+- engine (eikonal or reaction–diffusion; forced to reaction–diffusion when a scenario needs it);
+- points per case and catheter type;
+- anatomy (the current mesh, or a new procedural anatomy per case at variability 0.5 or 1);
+- random vagal and sympathetic tone per case;
+- warm-up (1.5 s), maximum dwell per site (3.5 s), EGM window options, and whether to include each
+  case's mesh.
+
+**Each case:**
+
+1. The case seed is derived from the base seed (`Rng.fork`), then the scenario, anatomy and tone.
+2. A normal `SimEngine` is built and warmed up.
+3. The roving catheter is placed at random non-boundary vertices. Each beat goes through the same
+   `MappingSession` auto-acquisition filters as interactive mapping (settled, stable, in contact,
+   CL within ±10 %, not on top of an existing point). The first accepted beat at a site gives its
+   point(s); otherwise the site is abandoned after the dwell limit. There are up to
+   3 × points-per-case attempts.
+4. Points are exported with labels as in §7.2. The case records its seed, scenario, preset,
+   fibrosis, anatomy, tone, effective sinus CL, the ground-truth summary and the critical-site
+   label.
+
+The output is one JSON (`ostium-batch/1`). Identical specs give identical output (tested).
+Cancelling keeps the finished cases.
+
+**Speed.** In eikonal mode, a point costs ≈ 1.2 s of simulated time (catheter settling plus one
+beat). The moving electrodes' signals in eikonal mode are now evaluated with lead-field weights
+binned by activation time, like the static table (§3.1 and the M5 notes). On one CPU core, 2 s of
+simulated eikonal time took 0.8 s instead of 2.7 s, so playback is now faster than real time.
+Reaction–diffusion batches are far slower without a GPU.
+
+### 7.4 Validation
+
+`tests/autonomic.test.ts` and `tests/export.test.ts`:
+
+- **GP zones** lie on the antra next to their veins.
+- **Vagal APD:** v = 0 leaves the APD unchanged; uniform mode gives 0.75×. In heterogeneous mode
+  the scale is < 0.62× at a GP centre and 0.88× far from the plexi. Ablating a zone brings its
+  centre back to 0.88×.
+- **Tissue model:** APD90 shortens most at a GP centre (above).
+- **Sinus CL:** the factors above; the engine reports 1200 ms for 800 ms at full vagal tone.
+- **Latent foci:** none fire at s = 0. At s = 1 all foci are armed, with bursts within 40 % of the
+  Poisson expectation. Triggers fire more often under sympathetic tone.
+- **EGM windows:** lengths and decimation.
+- **Labels:** depth classes; lesion core at an ablated focus; zero critical distance at the focus;
+  GP zone membership.
+- **Points:** CSV and JSON columns and values, with and without labels.
+- **Meshes:** PLY and VTK round-trips with map and label fields (NaN and −9999).
+- **Batch:** two eikonal cases × 5 points, every point labelled, with the requested window length;
+  repeated runs are byte-identical.
 
 ---
 
@@ -1174,6 +1349,22 @@ not modelled.
 - **Fixed anatomy.** The flutter circuits were validated on the default anatomy. On strongly
   varied procedural anatomies, a case may need re-induction.
 
+### Autonomic module and export (M7)
+- **Phenomenological tone.** Tone uses scaling rules, with no ACh/β-adrenergic channel models, no
+  time course (changes are instantaneous), no baroreflex, and no effect on CV or on the AV node
+  (which is not modelled).
+- **Schematic GP anatomy.** GP zones are four Gaussian patches. Real plexi are variable, partly
+  epicardial, and interconnected, including the ligament of Marshall. GP ablation acts through
+  endocardial lesion coverage only.
+- **Ectopy as stimuli.** Latent foci and triggers are stimulus trains, not afterdepolarizations
+  in the ionic model.
+- **Labels from the model.** Ground-truth labels describe this model's hidden state, for example
+  fibrosis as isolated nodes or depth as a per-vertex fraction. They are not histology or
+  imaging-derived truth.
+- **Batch points use random sites.** Sites are uniform over vertices, not a clinical mapping
+  workflow. In arrhythmia scenarios, the beat windows are referenced to the CS like interactive
+  mapping.
+
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
   - Assumes equal intra- and extracellular anisotropy ratios.
@@ -1247,3 +1438,8 @@ not modelled.
 45. Haïssaguerre M, Jaïs P, Shah DC, et al. Spontaneous initiation of atrial fibrillation by ectopic beats originating in the pulmonary veins. *N Engl J Med* 1998;339:659–666.
 46. Ouyang F, Antz M, Ernst S, et al. Recovered pulmonary vein conduction as a dominant factor for recurrent atrial tachyarrhythmias after complete circular isolation of the pulmonary veins. *Circulation* 2005;111:127–135.
 47. Pertsov AM, Davidenko JM, Salomonsz R, Baxter WT, Jalife J. Spiral waves of excitation underlie reentrant activity in isolated cardiac muscle. *Circ Res* 1993;72:631–650.
+48. Armour JA, Murphy DA, Yuan BX, Macdonald S, Hopkins DA. Gross and microscopic anatomy of the human intrinsic cardiac nervous system. *Anat Rec* 1997;247:289–298.
+49. Liu L, Nattel S. Differing sympathetic and vagal effects on atrial fibrillation in dogs: role of refractoriness heterogeneity. *Am J Physiol* 1997;273:H805–H816.
+50. Patterson E, Po SS, Scherlag BJ, Lazzara R. Triggered firing in pulmonary veins initiated by in vitro autonomic nerve stimulation. *Heart Rhythm* 2005;2:624–631.
+51. Po SS, Scherlag BJ, Yamanashi WS, et al. Experimental model for paroxysmal atrial fibrillation arising at the pulmonary vein–atrial junctions. *Heart Rhythm* 2006;3:201–208.
+52. Katritsis DG, Pokushalov E, Romanov A, et al. Autonomic denervation added to pulmonary vein isolation for paroxysmal atrial fibrillation: a randomized clinical trial. *J Am Coll Cardiol* 2013;62:2318–2325.

@@ -245,3 +245,6 @@ button.primary.danger { background: var(--danger); border-color: var(--danger); 
 .criteria-list .mark { font-weight: 700; }
 .criteria-list li.ok .mark { color: #45c46b; }
 .criteria-list li.fail .mark { color: var(--danger); }
+.autonomic-notes { margin: 4px 0 0; padding-left: 16px; }
+.panel .band { margin-top: 8px; }
+.panel .band button { margin-top: 4px; }

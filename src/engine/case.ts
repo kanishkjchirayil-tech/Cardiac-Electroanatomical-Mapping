@@ -14,12 +14,12 @@ import { CATHETER_RADIUS } from '../core/catheter/roving';
 import { captureFootprint } from '../core/pacing/capture';
 import { cycleLengthOf, firstActivation, median, SignalHistory } from '../core/pacing/analysis';
 import type { PacingRequest, PacingSite } from '../core/pacing/protocols';
-import type { ScenarioSetup } from '../core/scenarios/scenarios';
+import { pvSleeveFocus, type ScenarioSetup } from '../core/scenarios/scenarios';
 import { ConductionGraph, barrierComponents, openingComponent, pvConnectedFraction } from '../core/scenarios/topology';
 import { applyLesionsToSubstrate, type AblationController } from '../core/ablation/controller';
 import { LESION_TARGET_LQI } from '../core/ablation/lesion';
 import { RF_CONSTANTS } from '../core/ablation/rf';
-import { InductionDriver, PacingDriver, Probes, SinusDriver, SourceDriver } from './drivers';
+import { InductionDriver, LatentEctopyDriver, PacingDriver, Probes, SinusDriver, SourceDriver } from './drivers';
 import type { CaseGroundTruth, FromWorker, PacingInterval, PacingLogEntry, PacingStatus } from './protocol';
 
 /** What the case controller needs from the engine. */
@@ -77,7 +77,7 @@ export class CaseController {
   private rearmAfter = 0;
   private refChecked = false;
 
-  constructor(private readonly h: CaseHost, readonly setup: ScenarioSetup | null, sinusCl: number, siteIndex: { sinus: number[]; pace: number; sources: number[]; induction: number }) {
+  constructor(private readonly h: CaseHost, readonly setup: ScenarioSetup | null, sinusCl: number, siteIndex: { sinus: number[]; pace: number; sources: number[]; induction: number; ectopy: number }) {
     const sites = h.sinusSites.map((s, k) => ({ index: siteIndex.sinus[k]!, delay: s.delay }));
     this.sinus = new SinusDriver(h.sim, sites, sinusCl);
     this.probes.set('bb', h.sinusSites[0]!.vertices[0]!);
@@ -94,8 +94,30 @@ export class CaseController {
       // (it is then reset, i.e. suppressed, by the tachycardia).
       if (setup.induction.some((i) => i.kind === 'line')) this.sinus.restart(600);
     }
+    if (siteIndex.ectopy >= 0 && h.mesh.anatomy) {
+      const er = rng.fork(99);
+      const foci = PV_NAMES.map((pv) => ({ pv, ...pvSleeveFocus(h.mesh, pv, er), draw: er.next() }));
+      this.latent = new LatentEctopyDriver(h.sim, siteIndex.ectopy, foci, er.fork(1));
+    }
     this.hist = new SignalHistory(h.rig.channels.length, EGM_FS, 8);
     this.updateSources();
+  }
+
+  private latent: LatentEctopyDriver | null = null;
+
+  /** Change the sinus cycle length without restarting the sinus beat sequence (autonomic tone). */
+  setSinusRate(cl: number): void {
+    this.sinus.cl = cl;
+  }
+
+  /** Sympathetic tone: latent PV foci and scenario triggers (MODEL.md §7.1). */
+  setSympathetic(s: number, now: number): void {
+    for (const src of this.sources) src.sympathetic = s;
+    this.latent?.setTone(s, now);
+  }
+
+  get ectopicBursts(): number {
+    return this.latent?.bursts ?? 0;
   }
 
   setSinusCl(cl: number, now: number): void {
@@ -112,6 +134,7 @@ export class CaseController {
     this.induction?.step(end);
     this.sinus.schedule(end);
     for (const s of this.sources) s.schedule(end);
+    this.latent?.schedule(end);
     if (this.pacing.req) this.updateFootprint();
     for (const t of this.pacing.stimsIn(now, end)) this.pendingStims.push(t);
   }
@@ -328,6 +351,11 @@ export class CaseController {
       for (const v of s.spec.vertices) n += core[v]!;
       s.setActive(n < 0.5 * s.spec.vertices.length);
     }
+    this.latent?.foci.forEach((f, k) => {
+      let n = 0;
+      for (const v of f.vertices) n += core[v]!;
+      this.latent!.eliminated[k] = n >= 0.5 * f.vertices.length;
+    });
   }
 
   /** Re-induce the scenario arrhythmia if it stopped before the learner has delivered any lesion. */

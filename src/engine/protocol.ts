@@ -11,6 +11,8 @@ import type { RfReadout } from '../core/ablation/rf';
 import type { PacingProtocol, PacingRequest, PacingSite } from '../core/pacing/protocols';
 import type { ScenarioId, ScenarioPublic, ScenarioTruth } from '../core/scenarios/scenarios';
 import type { PvName } from '../core/mesh/regions';
+import type { AutonomicSettings } from '../core/ep/autonomic';
+import type { GroundTruthLabels } from '../core/export/labels';
 
 export type SimMode = 'eikonal' | 'rd';
 export type BackendPref = 'auto' | 'cpu';
@@ -202,7 +204,9 @@ export type ToWorker =
   | { type: 'pace'; request: PacingRequest }
   | { type: 'paceStop' }
   | { type: 'cardiovert' }
-  | { type: 'requestReport' };
+  | { type: 'requestReport' }
+  | { type: 'autonomic'; settings: AutonomicSettings }
+  | { type: 'requestLabels' };
 
 export type FromWorker =
   | { type: 'status'; message: string }
@@ -215,6 +219,10 @@ export type FromWorker =
   | { type: 'lesions'; lesions: Lesion[]; kind: Uint8Array; esophagealZone: Uint8Array }
   | { type: 'pacing'; status: PacingStatus | null }
   | { type: 'report'; report: CaseGroundTruth }
+  /** Autonomic state: effective sinus CL, GP efficacy, and per-vertex GP density (teacher view). */
+  | { type: 'autonomic'; settings: AutonomicSettings; sinusCl: number; gps: Array<{ name: string; centre: number; efficacy: number }>; density: Float32Array }
+  /** Per-vertex ground-truth labels for dataset export (MODEL.md §7.2). */
+  | { type: 'labels'; labels: GroundTruthLabels }
   /** The engine changed the timing reference (automatic choice at case start). */
   | { type: 'reference'; name: string }
   | { type: 'error'; message: string };

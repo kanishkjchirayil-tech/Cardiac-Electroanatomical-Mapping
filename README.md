@@ -19,7 +19,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | **M4** — Acquisition, annotation, LAT and voltage maps | ✅ done |
 | **M5** — Ablation and lesion tags | ✅ done |
 | **M6** — Pacing, entrainment, scenarios, case report | ✅ done |
-| M7 — Autonomic module, dataset export, batch mode | planned |
+| **M7** — Autonomic module, dataset export, batch mode | ✅ done |
 
 ## Running
 
@@ -28,7 +28,7 @@ You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU w
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 7 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy, ablation block vs gap, pacing, scenario endpoints)
+npm test           # Vitest suite (≈ 6 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy, ablation block vs gap, pacing, scenario endpoints, autonomic, export, batch)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
@@ -144,6 +144,25 @@ The sidebar has these panels:
     - stimulus-to-electrogram time and distance for every bipole (for differential pacing);
     - TCL, PPI and **PPI − TCL** after entrainment (≤ 30 ms means the tip is in the circuit).
   - Red marks on the EGM panel show the stimuli.
+- **Autonomic tone** (phenomenological model)
+  - **Vagal** slider: shorter refractoriness (strongest in the four ganglionated-plexus zones near
+    the PV antra when "uneven" is on) and a slower sinus rate.
+  - **Sympathetic** slider: a faster sinus rate, plus more frequent and more likely ectopic bursts
+    from the PV sleeves (reaction–diffusion engine).
+  - Ablating inside a plexus zone reduces its vagal effect. Teacher view → **GP zones** shows the
+    zones and how much of each is intact.
+- **Export**
+  - **Points** as CSV or JSON. Each point has its position, surface normal, region, LAT, voltages,
+    contact force and time. It also has the raw unipolar, bipolar and reference EGM windows
+    (choose the length and 1 or 2 kHz).
+  - With **ground-truth labels** on (the default), each point also carries fibrosis density and
+    depth class, lesion status, autonomic zone, and the distance to the scenario's critical site.
+  - **Mesh** as PLY or VTK, with per-vertex region, wall thickness, the interpolated LAT, voltage
+    and fractionation maps, and (optionally) the ground-truth label fields.
+  - **Batch generation** runs headless in a background worker. Choose the number of cases, base
+    seed, scenarios, engine, points per case, catheter, anatomy variation and random autonomic
+    tone. It maps each case automatically through the normal acquisition filters and downloads
+    one JSON dataset. The same seed always gives the same dataset.
 - **Signals**
   - Mains interference (50 or 60 Hz, or off) and a notch filter.
   - Noise level.
@@ -214,10 +233,11 @@ src/
     mapping/       annotation, mapping session (filters, undo), geodesic interpolation — sees signals only
     ablation/      RF application, empirical lesion model and raster, edema, esophagus, lesion-set helpers
     pacing/        capture model, protocols, signal-based pacing measurements
+    export/        point and mesh export, ground-truth labels
     scenarios/     seeded clinical scenarios, conduction-topology ground truth, case evaluation
-  engine/          simulation engine hosted in a worker (clock, backend selection, rhythm drivers, case runtime)
+  engine/          simulation engine hosted in a worker (clock, backend selection, rhythm drivers, case runtime, batch runner)
   render/          three.js viewer, colormaps, standard views (framework-free)
-  workers/         mesh generation and simulation workers
+  workers/         mesh generation, simulation and batch workers
   selftest/        CPU-vs-WebGPU comparison page (selftest.html)
   ui/              Preact UI (panels, state, mesh service with IndexedDB cache)
 tests/             Vitest specs

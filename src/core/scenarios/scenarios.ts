@@ -62,6 +62,9 @@ export interface ScenarioTruth {
   /** Centre of the gap and the positions of the missing lesions. */
   gapVertex?: number;
   gapVertices?: number[];
+  /** The site that distance labels refer to (critical isthmus, focus, trigger or gap; MODEL.md §7.2). */
+  criticalVertices?: number[];
+  criticalLabel?: string;
 }
 
 export interface PriorLesion {
@@ -144,8 +147,53 @@ export function scenarioInfo(id: ScenarioId): ScenarioPublic {
   return { id, ...PUBLIC[id] };
 }
 
-/** Build the seeded ground truth for a scenario on a mesh. */
+/** A seeded focus site in a vein's sleeve, 4–8 mm into the vein (≈ 2 mm radius). */
+export function pvSleeveFocus(mesh: SurfaceMesh, pv: PvName, r: Rng): { centre: number; vertices: Uint32Array } {
+  const P = mesh.positions;
+  const lm = mesh.anatomy!.pvs.find((p) => p.name === pv)!;
+  const depth = r.uniform(4, 8);
+  const c: Vec3 = [lm.ostiumCenter[0] + lm.axis[0] * depth, lm.ostiumCenter[1] + lm.axis[1] * depth, lm.ostiumCenter[2] + lm.axis[2] * depth];
+  const sleeve = Region[pv];
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < mesh.region.length; i++) {
+    if (mesh.region[i] !== sleeve) continue;
+    const d = Math.hypot(P[3 * i]! - c[0], P[3 * i + 1]! - c[1], P[3 * i + 2]! - c[2]) + r.uniform(0, 2);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return { centre: best, vertices: verticesNear(P, getV(P, best), 2) };
+}
+
+/** Build the seeded ground truth for a scenario on a mesh, including its critical site. */
 export function buildScenario(mesh: SurfaceMesh, id: ScenarioId, seed: number): ScenarioSetup {
+  const setup = buildScenarioCore(mesh, id, seed);
+  const t = setup.truth;
+  const tools = new MeshTools(mesh);
+  const P = mesh.positions;
+  const ring = (pvs: PvName[]) => tools.dilate(antralRing(mesh, pvs, WACA_OFFSET, 4), 2);
+  if (t.circuit === 'perimitral') {
+    t.criticalVertices = tools.path(tools.loop('MV'), [...ring(['LSPV', 'LIPV'])]);
+    t.criticalLabel = 'mitral isthmus';
+  } else if (t.circuit === 'roof') {
+    const top = (z: Set<number>) => [...z].filter((v) => P[3 * v + 2]! > 10);
+    t.criticalVertices = tools.path(top(ring(['LSPV', 'LIPV'])), top(ring(['RSPV', 'RIPV'])));
+    t.criticalLabel = 'roof isthmus';
+  } else if (t.gapVertices?.length) {
+    t.criticalVertices = [...t.gapVertices];
+    t.criticalLabel = 'reconnection gap';
+  } else if (t.focusVertex !== undefined) {
+    t.criticalVertices = [t.focusVertex];
+    t.criticalLabel = 'focus';
+  } else if (setup.sources.length) {
+    t.criticalVertices = setup.sources.map((s) => s.centre);
+    t.criticalLabel = 'PV trigger';
+  } else if (id === 'sinus' && t.earliestVertex !== undefined) {
+    t.criticalVertices = [t.earliestVertex];
+    t.criticalLabel = 'sinus breakthrough';
+  }
+  return setup;
+}
+
+function buildScenarioCore(mesh: SurfaceMesh, id: ScenarioId, seed: number): ScenarioSetup {
   const rng = new Rng(seed * 7919 + SCENARIO_IDS.indexOf(id));
   const tools = new MeshTools(mesh);
   const P = mesh.positions;
@@ -164,18 +212,8 @@ export function buildScenario(mesh: SurfaceMesh, id: ScenarioId, seed: number): 
     ...extra,
   });
   const pvTrigger = (pv: PvName, r: Rng): SourceSpec => {
-    const lm = mesh.anatomy!.pvs.find((p) => p.name === pv)!;
-    // A point in the sleeve 4–8 mm into the vein.
-    const depth = r.uniform(4, 8);
-    const c: Vec3 = [lm.ostiumCenter[0] + lm.axis[0] * depth, lm.ostiumCenter[1] + lm.axis[1] * depth, lm.ostiumCenter[2] + lm.axis[2] * depth];
-    const sleeve = Region[pv];
-    let best = -1, bd = Infinity;
-    for (let i = 0; i < mesh.region.length; i++) {
-      if (mesh.region[i] !== sleeve) continue;
-      const d = Math.hypot(P[3 * i]! - c[0], P[3 * i + 1]! - c[1], P[3 * i + 2]! - c[2]) + r.uniform(0, 2);
-      if (d < bd) { bd = d; best = i; }
-    }
-    return { name: `${pv} trigger`, pv, centre: best, vertices: verticesNear(P, getV(P, best), 2), mode: 'triggered', beats: [3, 8], cl: [170, 230], interval: [3500, 8000] };
+    const f = pvSleeveFocus(mesh, pv, r);
+    return { name: `${pv} trigger`, pv, ...f, mode: 'triggered', beats: [3, 8], cl: [170, 230], interval: [3500, 8000] };
   };
   const ringLesions = (pvs: PvName | PvName[], offset: number, skip: (k: number, n: number) => boolean = () => false): PriorLesion[] => {
     const ring = antralRing(mesh, pvs, offset, 4);

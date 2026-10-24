@@ -8,6 +8,9 @@ import type { SignalSettings } from '../core/signals/recording';
 import type { AblationSettings } from '../core/ablation/controller';
 import type { PacingRequest } from '../core/pacing/protocols';
 import type { ScenarioId } from '../core/scenarios/scenarios';
+import type { AutonomicSettings } from '../core/ep/autonomic';
+import type { GroundTruthLabels } from '../core/export/labels';
+import type { BatchDataset, BatchSpec } from '../engine/batch';
 import { EGM_FS } from '../core/signals/rig';
 import * as M from './mapping-state';
 
@@ -79,6 +82,12 @@ function ensureWorker(): Worker {
         S.pacingStatus.value = m.status?.active ? m.status : null;
         if (m.status) S.lastPacing.value = m.status;
         break;
+      case 'autonomic':
+        S.autonomicState.value = { sinusCl: m.sinusCl, gps: m.gps, density: m.density };
+        break;
+      case 'labels':
+        for (const r of labelWaiters.splice(0)) r(m.labels);
+        break;
       case 'reference':
         S.referenceChannel.value = m.name;
         break;
@@ -116,6 +125,7 @@ export function initSimulation(mesh: SurfaceMesh): void {
   send({ type: 'motion', enabled: S.motionEnabled.peek() });
   send({ type: 'setReference', name: S.referenceChannel.peek() });
   send({ type: 'ablationSettings', settings: S.ablationSettings.peek() });
+  send({ type: 'autonomic', settings: S.autonomic.peek() });
   S.lesions.value = [];
   S.rf.value = null;
   M.initMapping(mesh);
@@ -169,6 +179,7 @@ export const setReference = (name: string) => {
 export const setAblationSettings = (patch: Partial<AblationSettings>) => {
   S.ablationSettings.value = { ...S.ablationSettings.peek(), ...patch };
   send({ type: 'ablationSettings', settings: S.ablationSettings.peek() });
+  send({ type: 'autonomic', settings: S.autonomic.peek() });
 };
 export const rfStart = () => send({ type: 'rfStart', instant: S.rfInstant.peek() });
 export const rfStop = () => send({ type: 'rfStop' });
@@ -188,3 +199,34 @@ export const startCase = (id: ScenarioId | 'free', seed: number) => {
   configure({ scenario: id === 'free' ? null : { id, seed, run: Date.now() } });
   M.initMapping(S.mesh.peek()!);
 };
+
+export const setAutonomic = (patch: Partial<AutonomicSettings>) => {
+  S.autonomic.value = { ...S.autonomic.peek(), ...patch };
+  send({ type: 'autonomic', settings: S.autonomic.peek() });
+};
+
+const labelWaiters: Array<(l: GroundTruthLabels) => void> = [];
+/** Ground-truth labels for export (hidden state; never used for maps). */
+export function requestLabels(): Promise<GroundTruthLabels> {
+  return new Promise((resolve) => {
+    labelWaiters.push(resolve);
+    send({ type: 'requestLabels' });
+  });
+}
+
+// ---- Batch generation (separate worker) ----
+let batchWorker: Worker | null = null;
+export function runBatch(spec: BatchSpec, mesh: SurfaceMesh, onDone: (d: BatchDataset, cancelled: boolean) => void): void {
+  batchWorker?.terminate();
+  batchWorker = new Worker(new URL('../workers/batch.worker.ts', import.meta.url), { type: 'module' });
+  S.batchRunning.value = true;
+  S.batchProgress.value = { caseIndex: 0, cases: spec.cases, points: 0, pointsPerCase: spec.pointsPerCase };
+  batchWorker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'progress') S.batchProgress.value = m.progress;
+    else if (m.type === 'done') { S.batchRunning.value = false; onDone(m.dataset, m.cancelled); batchWorker?.terminate(); batchWorker = null; }
+    else if (m.type === 'error') { S.batchRunning.value = false; S.errorMsg.value = `Batch failed: ${m.message}`; batchWorker?.terminate(); batchWorker = null; }
+  };
+  batchWorker.postMessage({ type: 'run', spec, mesh });
+}
+export const cancelBatch = () => batchWorker?.postMessage({ type: 'cancel' });

@@ -4,6 +4,7 @@ import type { EgmSamples } from '../core/ep/backend';
 import type { SourceSpec, Induction } from '../core/scenarios/scenarios';
 import { protocolEnd, protocolTrains, type PacingRequest } from '../core/pacing/protocols';
 import { Rng } from '../core/rng';
+import { AUTONOMIC } from '../core/ep/autonomic';
 
 /**
  * Rhythm drivers for the reaction–diffusion engine (MODEL.md §6.1–6.2). They schedule stimulus
@@ -102,6 +103,8 @@ export class SinusDriver {
 /** An ectopic source: automatic (reset like the sinus node) or intermittently triggered bursts. */
 export class SourceDriver {
   active = true;
+  /** Sympathetic tone 0..1 (MODEL.md §7.1): more frequent and longer trigger runs. */
+  sympathetic = 0;
   private next: number;
   private lastFire = -Infinity;
 
@@ -118,11 +121,11 @@ export class SourceDriver {
         this.lastFire = this.next;
         this.next += s.cl;
       } else {
-        const beats = this.rng.int(s.beats[0], s.beats[1] + 1);
+        const beats = this.rng.int(s.beats[0], s.beats[1] + 1) + Math.round(AUTONOMIC.triggerExtraBeats * this.sympathetic);
         const cl = this.rng.uniform(s.cl[0], s.cl[1]);
         this.sim.schedule.trains.push({ site: this.index, start: this.next, period: cl, count: beats });
         this.lastFire = this.next + (beats - 1) * cl;
-        this.next = this.lastFire + this.rng.uniform(s.interval[0], s.interval[1]);
+        this.next = this.lastFire + this.rng.uniform(s.interval[0], s.interval[1]) / (1 + AUTONOMIC.triggerIntervalGain * this.sympathetic);
       }
     }
   }
@@ -137,6 +140,60 @@ export class SourceDriver {
     if (on === this.active) return;
     this.active = on;
     if (!on) this.sim.schedule.trains = this.sim.schedule.trains.filter((tr) => tr.site !== this.index);
+  }
+}
+
+/**
+ * Latent PV-sleeve foci driven by sympathetic tone (MODEL.md §7.1): one focus per vein, armed when
+ * its seeded draw is below the tone; armed foci fire 1–3-beat bursts (CL 220–300 ms) as a Poisson
+ * process. All foci share one stimulus site whose vertices are switched before each burst.
+ */
+export class LatentEctopyDriver {
+  private s = 0;
+  private next = Infinity;
+  private lastEnd = -Infinity;
+  readonly eliminated: boolean[];
+  /** Bursts fired so far (for tests and the teacher view). */
+  bursts = 0;
+
+  constructor(
+    private readonly sim: Simulation,
+    readonly index: number,
+    readonly foci: Array<{ pv: string; centre: number; vertices: Uint32Array; draw: number }>,
+    private readonly rng: Rng,
+  ) {
+    this.eliminated = foci.map(() => false);
+  }
+
+  private armed(): number[] {
+    return this.foci.map((f, k) => (f.draw < this.s && !this.eliminated[k] ? k : -1)).filter((k) => k >= 0);
+  }
+
+  private wait(): number {
+    const n = this.armed().length;
+    const rate = AUTONOMIC.latentRate * this.s * n; // bursts per second
+    return rate > 0 ? (-Math.log(Math.max(1e-9, this.rng.next())) / rate) * 1000 : Infinity;
+  }
+
+  setTone(s: number, now: number): void {
+    this.s = Math.max(0, Math.min(1, s));
+    this.next = Math.max(now, this.lastEnd) + this.wait();
+  }
+
+  schedule(end: number): void {
+    while (this.next <= end) {
+      const armed = this.armed();
+      if (!armed.length) { this.next = Infinity; return; }
+      const f = this.foci[armed[this.rng.int(0, armed.length)]!]!;
+      const site = this.sim.schedule.sites[this.index]!;
+      site.vertices = f.vertices;
+      this.sim.markSitesChanged();
+      const beats = this.rng.int(1, 4), cl = this.rng.uniform(220, 300);
+      this.sim.schedule.trains.push({ site: this.index, start: this.next, period: cl, count: beats });
+      this.bursts++;
+      this.lastEnd = this.next + (beats - 1) * cl + 400;
+      this.next = this.lastEnd + this.wait();
+    }
   }
 }
 

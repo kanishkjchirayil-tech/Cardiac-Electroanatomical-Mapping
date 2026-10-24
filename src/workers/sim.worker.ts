@@ -30,5 +30,7 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case 'paceStop': void engine.paceStop(); break;
     case 'cardiovert': void engine.cardiovert(); break;
     case 'requestReport': void engine.requestReport(); break;
+    case 'autonomic': void engine.setAutonomic(m.settings); break;
+    case 'requestLabels': void engine.requestLabels(); break;
   }
 };

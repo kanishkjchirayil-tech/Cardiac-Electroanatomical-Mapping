@@ -19,6 +19,9 @@ import type { EgmSamples } from '../core/ep/backend';
 import { AblationController, DEFAULT_ABLATION, applyLesionsToSubstrate, type AblationSettings } from '../core/ablation/controller';
 import { buildEsophagus, type EsophagusModel } from '../core/ablation/esophagus';
 import type { RfFrame } from './protocol';
+import { DEFAULT_AUTONOMIC, autonomicApdScale, buildGpZones, gpDensity, gpEfficacy, sinusClFactor, type AutonomicSettings, type GpZone } from '../core/ep/autonomic';
+import { MAX_STIM_SITES } from '../core/ep/stimulus';
+import { buildLabels, type GroundTruthLabels } from '../core/export/labels';
 import { buildScenario, type ScenarioSetup } from '../core/scenarios/scenarios';
 import type { PacingRequest } from '../core/pacing/protocols';
 import { CaseController, caseGroundTruth, type CaseHost } from './case';
@@ -152,6 +155,9 @@ export class SimEngine {
       this.ablation.rebase(oldNow, 0);
     }
     this.rasterizeLesions(0);
+    this.gpZones = buildGpZones(this.mesh, sc ? sc.seed : c.seed);
+    this.baseApd = this.tissue.substrate.apdScale.slice();
+    this.applyApd();
     this.post({ type: 'status', message: 'Calibrating conduction velocity…' });
     const dt = model.recommendedDt;
     this.cal = await calibrateDiffusivity(this.ionic, preset.targetCv, { h: this.tissue.geom.meanEdge, dt });
@@ -196,13 +202,15 @@ export class SimEngine {
       const paceIdx = sched.addSite({ name: 'Pacing', vertices: new Uint32Array(0), amplitude: 0, duration: 2 });
       const srcIdx = (sc?.sources ?? []).map((src) => sched.addSite({ name: src.name, vertices: src.vertices, amplitude: 0.6, duration: 2 }));
       const indIdx = sc?.induction.length ? sched.addSite({ name: 'Induction', vertices: new Uint32Array(0), amplitude: 0.5, duration: 2 }) : -1;
+      const ectIdx = sched.sites.length < MAX_STIM_SITES ? sched.addSite({ name: 'PV ectopy', vertices: new Uint32Array(0), amplitude: 0.6, duration: 2 }) : -1;
       this.sim.markSitesChanged();
-      this.siteIndex = { sinus: sinusIdx, pace: paceIdx, sources: srcIdx, induction: indIdx };
+      this.siteIndex = { sinus: sinusIdx, pace: paceIdx, sources: srcIdx, induction: indIdx, ectopy: ectIdx };
     }
     if (gen !== this.generation) return;
     this.buildRig();
     if (this.sim) {
-      this.caseCtl = new CaseController(this.caseHost(), sc, c.sinusCl, this.siteIndex);
+      this.caseCtl = new CaseController(this.caseHost(), sc, this.sinusCl(), this.siteIndex);
+      this.caseCtl.setSympathetic(this.autonomic.sympathetic, 0);
       this.uploadLeadFields();
     }
     this.post({ type: 'pacing', status: null });
@@ -224,6 +232,7 @@ export class SimEngine {
     };
     this.post({ type: 'ready', info, config: { ...c }, rig: this.rigInfo(), scenario: sc?.info ?? null });
     this.postLesions();
+    this.postAutonomic();
     await this.postFrame(true);
   }
 
@@ -315,17 +324,6 @@ export class SimEngine {
     });
   }
 
-  /** Steady-state eikonal Vm of vertex i at time t (normalized). */
-  private eikVm(i: number, t: number): number {
-    const T = this.eikonalT!, tpl = this.template!;
-    const ti = T[i]!;
-    if (!Number.isFinite(ti)) return 0;
-    const cl = this.config.sinusCl;
-    if (cl <= 0) return tpl.at(t - ti);
-    const phase = ((t % cl) + cl) % cl;
-    return Math.max(tpl.at(phase - ti), tpl.at(phase + cl - ti));
-  }
-
   /**
    * Precompute one cycle of the non-moving electrodes (ECG, CS) in eikonal mode. Each vertex's
    * Vm depends on t only through t − T_i, so lead-field weights are binned by activation time
@@ -335,7 +333,7 @@ export class SimEngine {
   private buildEikonalTable(): void {
     if (!this.rig || !this.eikonalT || !this.template) return;
     const step = 1000 / EGM_FS;
-    const cl = this.config.sinusCl > 0 ? this.config.sinusCl : 600;
+    const cl = this.sinusCl() > 0 ? this.sinusCl() : 600;
     const len = Math.round(cl / step);
     const rows = this.rig.electrodes.map((e, i) => (e.group === 'ecg' || e.group === 'cs' ? i : -1)).filter((i) => i >= 0);
     const fields = this.rig.rows();
@@ -354,7 +352,7 @@ export class SimEngine {
         W[j * nBins + k + 1] += a * f.w[q]!;
       }
     });
-    const tpl = this.template, periodic = this.config.sinusCl > 0;
+    const tpl = this.template, periodic = this.sinusCl() > 0;
     const vm = new Float64Array(nBins);
     const data = new Float32Array(len * rows.length);
     for (let s = 0; s < len; s++) {
@@ -381,37 +379,52 @@ export class SimEngine {
     this.eikNextSample = times[times.length - 1]! + step;
     const nE = rig.electrodes.length;
     const data = new Float32Array(times.length * nE);
-    const cl = this.config.sinusCl;
-    const moving = this.movingFields();
-    const vmU = new Float32Array(moving.union.length);
+    const cl = this.sinusCl();
+    const mb = this.movingBins();
+    const tpl = this.template!, nB = mb.nBins, vm = new Float64Array(nB);
     times.forEach((t, s) => {
       const k = cl > 0 ? Math.round((((t % cl) + cl) % cl) / step) % tab.len : Math.min(tab.len - 1, Math.round(t / step));
       tab.rows.forEach((r, j) => (data[s * nE + r] = tab.data[k * tab.rows.length + j]!));
-      // Each vertex in the union of the moving electrodes' supports is evaluated once per sample.
-      for (let j = 0; j < moving.union.length; j++) vmU[j] = this.eikVm(moving.union[j]!, t);
-      for (const m of moving.rows) {
+      // Moving electrodes: lead-field weights binned by activation time (as in buildEikonalTable),
+      // so each sample is a short dot product over 0.5 ms bins instead of a sum over vertices.
+      const phase = cl > 0 ? ((t % cl) + cl) % cl : t;
+      for (let b = 0; b < nB; b++) vm[b] = cl > 0 ? Math.max(tpl.at(phase - b * step), tpl.at(phase + cl - b * step)) : tpl.at(t - b * step);
+      mb.rows.forEach((row, j) => {
         let acc = 0;
-        for (let q = 0; q < m.pos.length; q++) acc += m.w[q]! * vmU[m.pos[q]!]!;
-        data[s * nE + m.row] = acc;
-      }
+        const o = j * nB;
+        for (let b = 0; b < nB; b++) acc += mb.W[o + b]! * vm[b]!;
+        data[s * nE + row] = acc;
+      });
     });
     return { times: Float64Array.from(times), data, rows: nE };
   }
 
-  private movingCache: { version: number; union: Uint32Array; rows: Array<{ row: number; pos: Uint32Array; w: Float32Array }> } | null = null;
+  private movingBinCache: { version: number; T: Float32Array; nBins: number; rows: number[]; W: Float64Array } | null = null;
 
-  /** Lead fields of the moving (catheter) electrodes, re-indexed into the union of their supports. */
-  private movingFields(): NonNullable<SimEngine['movingCache']> {
-    const rig = this.rig!;
-    if (this.movingCache?.version === rig.version) return this.movingCache;
+  /** Moving (catheter) lead fields binned by eikonal activation time (linear split between 0.5 ms bins). */
+  private movingBins(): NonNullable<SimEngine['movingBinCache']> {
+    const rig = this.rig!, T = this.eikonalT!;
+    const c = this.movingBinCache;
+    if (c && c.version === rig.version && c.T === T) return c;
+    const step = 1000 / EGM_FS;
+    let tMax = 0;
+    for (const t of T) if (Number.isFinite(t)) tMax = Math.max(tMax, t);
+    const nBins = Math.ceil(tMax / step) + 2;
     const fields = rig.rows();
-    const rowsIdx = rig.electrodes.map((e, i) => (e.group === 'map' || e.group === 'grid' ? i : -1)).filter((i) => i >= 0 && fields[i]!.idx.length > 0);
-    const where = new Map<number, number>();
-    for (const r of rowsIdx) for (const v of fields[r]!.idx) if (!where.has(v)) where.set(v, where.size);
-    const union = Uint32Array.from(where.keys());
-    const rows = rowsIdx.map((r) => ({ row: r, pos: Uint32Array.from(fields[r]!.idx, (v) => where.get(v)!), w: fields[r]!.w }));
-    this.movingCache = { version: rig.version, union, rows };
-    return this.movingCache;
+    const rows = rig.electrodes.map((e, i) => (e.group === 'map' || e.group === 'grid' ? i : -1)).filter((i) => i >= 0 && fields[i]!.idx.length > 0);
+    const W = new Float64Array(rows.length * nBins);
+    rows.forEach((r, j) => {
+      const f = fields[r]!;
+      for (let q = 0; q < f.idx.length; q++) {
+        const ti = T[f.idx[q]!]!;
+        if (!Number.isFinite(ti)) continue;
+        const x = ti / step, k = Math.floor(x), a = x - k;
+        W[j * nBins + k] += (1 - a) * f.w[q]!;
+        W[j * nBins + k + 1] += a * f.w[q]!;
+      }
+    });
+    this.movingBinCache = { version: rig.version, T, nBins, rows, W };
+    return this.movingBinCache;
   }
 
   private collect(samples: EgmSamples | null): void {
@@ -454,7 +467,7 @@ export class SimEngine {
   }
 
   private applySinus(): void {
-    if (this.sim) this.caseCtl?.setSinusCl(this.config.sinusCl, this.sim.t);
+    if (this.sim) this.caseCtl?.setSinusCl(this.sinusCl(), this.sim.t);
   }
 
   play(): void {
@@ -553,7 +566,7 @@ export class SimEngine {
     while (end - this.now() > half) {
       const now = this.now();
       if (this.rig && now >= this.nextMotionT - 1e-9) {
-        if (this.rig.updateMotion(now, this.config.sinusCl)) this.uploadLeadFields();
+        if (this.rig.updateMotion(now, this.sinusCl())) this.uploadLeadFields();
         this.nextMotionT = (Math.floor(now / MOTION_UPDATE_MS + 1e-9) + 1) * MOTION_UPDATE_MS;
       }
       const piece = Math.min(end, this.rig ? this.nextMotionT : end) - now;
@@ -663,7 +676,7 @@ export class SimEngine {
     const n = this.tissue?.geom.nV ?? 0;
     const out = new Float32Array(n);
     if (!T || !tpl) return out;
-    const cl = this.config.sinusCl;
+    const cl = this.sinusCl();
     const t = this.eikT;
     const phase = cl > 0 ? t % cl : t;
     for (let i = 0; i < n; i++) {
@@ -688,7 +701,7 @@ export class SimEngine {
         let min = Infinity, max = -Infinity;
         for (const x of last) if (Number.isFinite(x)) { min = Math.min(min, x); max = Math.max(max, x); }
         beatStart = Number.isFinite(min) ? min : 0;
-        if (this.config.sinusCl > 0 && max - min > this.config.sinusCl) beatStart = max - this.config.sinusCl;
+        if (this.sinusCl() > 0 && max - min > this.sinusCl()) beatStart = max - this.sinusCl();
       } else {
         last = this.eikonalT ? this.eikonalT.slice() : new Float32Array(n).fill(-Infinity);
       }
@@ -725,10 +738,10 @@ export class SimEngine {
     if (!this.tissue || !this.cal) return;
     const now = this.now();
     this.rasterizeLesions(now);
-    const sub = this.tissue.substrate;
+    // GP ablation changes the vagal APD pattern (MODEL.md §7.1).
+    this.applyApd();
     if (this.sim) {
       this.sim.backend.setEdgeDiffusivity(this.edgeD());
-      this.sim.backend.setVertexParams(sub.apdScale, sub.excitable());
       this.caseCtl?.updateSources();
       this.caseCtl?.updateFootprint();
     } else {
@@ -740,6 +753,7 @@ export class SimEngine {
       if (!this.sim) this.buildEikonalTable();
     }
     this.postLesions();
+    this.postAutonomic();
   }
 
   private postLesions(): void {
@@ -815,7 +829,49 @@ export class SimEngine {
 
   // ---- Case: pacing, cardioversion, report --------------------------------------------------------
 
-  private siteIndex = { sinus: [] as number[], pace: -1, sources: [] as number[], induction: -1 };
+  private siteIndex = { sinus: [] as number[], pace: -1, sources: [] as number[], induction: -1, ectopy: -1 };
+
+  // ---- Autonomic tone (MODEL.md §7.1) ------------------------------------------------------------
+
+  private autonomic: AutonomicSettings = { ...DEFAULT_AUTONOMIC };
+  private gpZones: GpZone[] = [];
+  /** Substrate APD scale before autonomic modulation. */
+  private baseApd: Float32Array | null = null;
+
+  /** Effective sinus cycle length (configured CL × autonomic factor). */
+  private sinusCl(): number {
+    const cl = this.config.sinusCl;
+    return cl > 0 ? Math.round(cl * sinusClFactor(this.autonomic)) : 0;
+  }
+
+  /** Write the autonomic APD scale into the substrate (and the solver, if running). */
+  private applyApd(): void {
+    if (!this.tissue || !this.baseApd) return;
+    const sub = this.tissue.substrate;
+    sub.apdScale = autonomicApdScale(this.baseApd, this.gpZones, this.lesionKind, this.autonomic);
+    this.sim?.backend.setVertexParams(sub.apdScale, sub.excitable());
+  }
+
+  setAutonomic(settings: AutonomicSettings): Promise<void> {
+    return this.enqueue(async () => {
+      const oldCl = this.sinusCl();
+      this.autonomic = { ...settings };
+      this.applyApd();
+      if (this.sinusCl() !== oldCl) {
+        this.caseCtl?.setSinusRate(this.sinusCl());
+        if (!this.sim) this.buildEikonalTable();
+      }
+      if (this.sim) this.caseCtl?.setSympathetic(this.autonomic.sympathetic, this.sim.t);
+      this.postAutonomic();
+    });
+  }
+
+  private postAutonomic(): void {
+    if (!this.mesh) return;
+    const eff = gpEfficacy(this.gpZones, this.lesionKind);
+    const density = gpDensity(this.gpZones, this.mesh.region.length, eff);
+    this.post({ type: 'autonomic', settings: { ...this.autonomic }, sinusCl: this.sinusCl(), gps: this.gpZones.map((z, k) => ({ name: z.name, centre: z.centre, efficacy: eff[k]! })), density }, [density.buffer]);
+  }
 
   /** Edge diffusivities of the current substrate, with any transient induction block applied. */
   private edgeD(): Float32Array {
@@ -885,12 +941,33 @@ export class SimEngine {
     });
   }
 
+  /** Effective sinus cycle length, ms (0 = sinus off). */
+  effectiveSinusCl(): number {
+    return this.sinusCl();
+  }
+
+  /** Per-vertex ground-truth labels for dataset export. */
+  labels(): GroundTruthLabels | null {
+    if (!this.tissue || !this.mesh) return null;
+    const t = this.scenario?.truth;
+    return buildLabels(this.mesh, this.tissue.substrate, this.lesionKind, this.gpZones,
+      t?.criticalVertices?.length ? { vertices: t.criticalVertices, label: t.criticalLabel ?? 'critical site' } : null,
+      { scenario: this.scenario?.info.id ?? null, seed: this.scenario?.seed ?? this.config.seed });
+  }
+
+  requestLabels(): Promise<void> {
+    return this.enqueue(async () => {
+      const labels = this.labels();
+      if (labels) this.post({ type: 'labels', labels });
+    });
+  }
+
   requestReport(): Promise<void> {
     return this.enqueue(async () => {
       if (!this.tissue || !this.ablation || !this.mesh || !this.cal || !this.esophagus) return;
       const now = this.now();
       const report = this.caseCtl
-        ? this.caseCtl.report(now, this.config.sinusCl)
+        ? this.caseCtl.report(now, this.sinusCl())
         : caseGroundTruth(
             { mesh: this.mesh, substrate: this.tissue.substrate, geom: this.tissue.geom, D0: this.cal.D, sinusSites: this.sites, ablation: this.ablation, esophagealZone: this.esophagus.zone },
             this.scenario, now, performance.now() - this.caseWall0,

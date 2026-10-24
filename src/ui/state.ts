@@ -5,6 +5,7 @@ import type { ClipState, HoverInfo } from '../render/viewer';
 import { DEFAULT_SIM_CONFIG, type CaseGroundTruth, type PacingStatus, type RfFrame, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from '../engine/protocol';
 import { DEFAULT_PACING, type PacingRequest } from '../core/pacing/protocols';
 import type { ScenarioId, ScenarioPublic } from '../core/scenarios/scenarios';
+import { DEFAULT_AUTONOMIC, type AutonomicSettings } from '../core/ep/autonomic';
 import { DEFAULT_ABLATION, type AblationSettings } from '../core/ablation/controller';
 import type { Lesion } from '../core/ablation/lesion';
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
@@ -35,7 +36,7 @@ export const genSeed = signal(1);
 export const genVariability = signal(0);
 
 // ---- Simulation ----
-export type TeacherOverlay = 'vm' | 'lat' | 'substrate';
+export type TeacherOverlay = 'vm' | 'lat' | 'substrate' | 'autonomic';
 
 export const simConfig = signal<SimConfig>({ ...DEFAULT_SIM_CONFIG });
 export const simInfo = signal<SimInfo | null>(null);
@@ -87,3 +88,10 @@ export const scenarioChoice = signal<ScenarioId | 'free'>('free');
 export const scenarioSeed = signal(1);
 export const caseReport = signal<CaseGroundTruth | null>(null);
 export const reportOpen = signal(false);
+
+// ---- Autonomic tone and export ----
+export const autonomic = signal<AutonomicSettings>({ ...DEFAULT_AUTONOMIC });
+/** Engine-side autonomic state: effective sinus CL, GP efficacy and GP density (teacher view). */
+export const autonomicState = signal<{ sinusCl: number; gps: Array<{ name: string; centre: number; efficacy: number }>; density: Float32Array } | null>(null);
+export const batchProgress = signal<{ caseIndex: number; cases: number; points: number; pointsPerCase: number } | null>(null);
+export const batchRunning = signal(false);

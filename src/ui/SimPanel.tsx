@@ -101,7 +101,7 @@ export function SimPanel() {
 
 function TeacherControls() {
   const on = S.teacherView.value;
-  const opts: Array<[S.TeacherOverlay, string]> = [['vm', 'Voltage'], ['lat', 'True activation'], ['substrate', 'Substrate']];
+  const opts: Array<[S.TeacherOverlay, string]> = [['vm', 'Voltage'], ['lat', 'True activation'], ['substrate', 'Substrate'], ['autonomic', 'GP zones']];
   return (
     <div class="teacher">
       <label class="check">
