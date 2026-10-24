@@ -16,7 +16,7 @@ Modeling assumptions, equations, parameters, and references are in **[MODEL.md](
 | **M1** — Mesh, rendering, camera views, region labels | ✅ done |
 | **M2** — Monodomain / eikonal solver, calibration, sinus rhythm | ✅ done |
 | **M3** — Catheters, EGM synthesis, EGM panel | ✅ done |
-| M4 — Acquisition, annotation, LAT and voltage maps | planned |
+| **M4** — Acquisition, annotation, LAT and voltage maps | ✅ done |
 | M5 — Ablation and lesion tags | planned |
 | M6 — Pacing, entrainment, scenarios, case report | planned |
 | M7 — Autonomic module, dataset export, batch mode | planned |
@@ -28,7 +28,7 @@ You need Node ≥ 20 and a browser with WebGL 2. The tissue solver uses WebGPU w
 ```bash
 npm install        # .npmrc sets legacy-peer-deps (works around an npm 10 optional-peer resolution bug)
 npm run dev        # dev server at http://localhost:5173
-npm test           # Vitest suite (≈ 1.5 min; mesh, solver, calibration, reentry, sinus rhythm, electrograms)
+npm test           # Vitest suite (≈ 3 min; mesh, solver, reentry, sinus rhythm, electrograms, mapping accuracy)
 npm run build      # type-check + production build into dist/
 npm run preview    # serve dist/
 ```
@@ -53,6 +53,9 @@ On first load the procedural atrium (~16.5 k vertices) is generated in a Web Wor
 | Shift-drag on the shell | Slide the catheter tip across the wall |
 | Arrow keys | Nudge the tip 2 mm across the wall in the screen direction (with Shift: 0.5 mm) |
 | `[` / `]` | Contact force −5 g / +5 g |
+| `P` | Acquire point(s) from the latest beat |
+| Click a point marker | Select it in the point list and inspector |
+| `Delete` / `Ctrl+Z` | Delete the selected point / undo |
 
 The sidebar has these panels:
 
@@ -72,6 +75,23 @@ The sidebar has these panels:
   - A live force bar and a **Stable / Unstable** badge. Stable means tip movement SD < 1 mm and
     force 5–40 g over the last second.
   - Cardiac and respiratory tip motion can be switched off.
+- **Mapping**
+  - **Acquire point** takes every electrode of the latest beat. **Auto-acquire** keeps only beats
+    that meet the criteria: catheter settled, stable and in contact, CL within ±10 % of the
+    reference, on the surface, and not on top of an existing point. The verdict for the last beat
+    is shown live.
+  - Map types: **LAT**, **bipolar voltage**, **unipolar voltage**, **fractionation**, and an animated
+    **propagation** map.
+  - Map settings:
+    - LAT colour range (auto or manual) and voltage thresholds (default 0.1 / 0.5 mV bipolar).
+    - Fill threshold and projection cutoff.
+    - Point markers, conduction-velocity vectors, and **anatomy build**, which reveals the shell only
+      where the catheter has been.
+  - Annotation settings: window of interest relative to the CS reference, and the LAT method
+    (steepest unipolar downslope or bipolar peak).
+  - Points list: delete, undo, clear. The **inspector** shows the stored reference, bipolar and
+    unipolar EGMs; click on them to re-annotate LAT. It also has *Auto LAT*, exclude, and tags.
+  - The **HD grid** catheter (Roving catheter panel) acquires up to 16 points per beat.
 - **Signals**
   - Mains interference (50 or 60 Hz, or off) and a notch filter.
   - Noise level.
@@ -138,7 +158,8 @@ src/
     mesh/          implicit atrium, surface nets, remeshing, labels, thickness, topology, geodesics, I/O
     ep/            FEM operators, ionic models, substrate, CPU and WebGPU solvers, eikonal, calibration
     catheter/      CS decapolar and roving catheter geometry, contact and motion models, surface walking
-    signals/       lead fields, recording chain (noise, referencing, filters), ECG, activation detection
+    signals/       lead fields, recording chain (noise, referencing, filters), ECG, beat windows, detection
+    mapping/       annotation, mapping session (filters, undo), geodesic interpolation — sees signals only
   engine/          simulation engine hosted in a worker (clock, sinus pacing, backend selection)
   render/          three.js viewer, colormaps, standard views (framework-free)
   workers/         mesh generation and simulation workers

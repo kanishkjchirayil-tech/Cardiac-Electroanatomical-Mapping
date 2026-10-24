@@ -8,8 +8,9 @@ import type { SolverBackend } from '../core/ep/backend';
 import { PRESETS, buildTissue, sinusSites, type SinusSite, type TissueBuild } from '../core/ep/tissue';
 import { fastMarching, type ApTemplate } from '../core/ep/eikonal';
 import { makeApTemplate } from '../core/ep/ap-template';
-import { DEFAULT_SIM_CONFIG, type EgmChunk, type FromWorker, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from './protocol';
+import { DEFAULT_SIM_CONFIG, type BeatWindow, type EgmChunk, type FromWorker, type RigInfo, type RovingFrame, type SimConfig, type SimInfo } from './protocol';
 import { ElectrogramRig, EGM_FS, MOTION_UPDATE_MS } from '../core/signals/rig';
+import { BeatExtractor } from '../core/signals/beats';
 import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
 import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
 import { Region } from '../core/mesh/regions';
@@ -54,6 +55,10 @@ export class SimEngine {
   /** Eikonal mode: one sinus cycle of the static (ECG + CS) electrode potentials, 0.5 ms steps. */
   private eikTable: { data: Float32Array; len: number; rows: number[] } | null = null;
   private eikNextSample = 0;
+  private beats: BeatExtractor | null = null;
+  private refName = 'CS 7-8';
+  /** Indices of the channels shown in the EGM panel. */
+  private displayIdx: number[] = [];
 
   constructor(private readonly post: (msg: FromWorker, transfer?: Transferable[]) => void) {}
 
@@ -160,6 +165,8 @@ export class SimEngine {
     if (this.rovingVertex < 0 || this.rovingVertex >= mesh.region.length) this.rovingVertex = defaultRovingVertex(mesh);
     this.rig.placeRoving(this.rovingVertex, this.rovingConfig);
     this.egmChunks = [];
+    this.displayIdx = this.rig.channels.map((c, i) => (c.display ? i : -1)).filter((i) => i >= 0);
+    this.beats = new BeatExtractor({ fs: EGM_FS, nCh: this.rig.channels.length, refChannel: this.channelIndex(this.refName), preMs: 350, postMs: 350 });
     this.nextMotionT = this.now();
     this.eikNextSample = Math.ceil(this.now() / (1000 / EGM_FS)) * (1000 / EGM_FS);
     this.uploadLeadFields();
@@ -174,13 +181,25 @@ export class SimEngine {
     if (this.sim && this.rig) this.sim.backend.setLeadFields(this.rig.rows(), this.sampleEvery());
   }
 
+  private channelIndex(name: string): number {
+    const i = this.rig?.channels.findIndex((c) => c.name === name) ?? -1;
+    return i >= 0 ? i : (this.rig?.channels.findIndex((c) => c.group === 'cs') ?? 0);
+  }
+
+  setReference(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      this.refName = name;
+      this.beats?.setReference(this.channelIndex(name));
+    });
+  }
+
   private rigInfo(): RigInfo {
     const r = this.rig!;
     const site = this.sites.find((x) => x.name === 'Fossa ovalis') ?? this.sites[0];
     const P = this.mesh!.positions, N = this.mesh!.normals;
     const v = site ? site.vertices[0]! : 0;
     return {
-      channels: r.channels,
+      channels: r.channels.filter((c) => c.display),
       fs: EGM_FS,
       csPath: r.cs.path.flat(),
       csElectrodes: r.cs.electrodes.flat(),
@@ -239,7 +258,7 @@ export class SimEngine {
     const step = 1000 / EGM_FS;
     const cl = this.config.sinusCl > 0 ? this.config.sinusCl : 600;
     const len = Math.round(cl / step);
-    const rows = this.rig.electrodes.map((e, i) => (e.group === 'map' ? -1 : i)).filter((i) => i >= 0);
+    const rows = this.rig.electrodes.map((e, i) => (e.group === 'ecg' || e.group === 'cs' ? i : -1)).filter((i) => i >= 0);
     const fields = this.rig.rows();
     const n = this.eikonalT.length;
     const vm = new Float32Array(n);
@@ -268,26 +287,45 @@ export class SimEngine {
     this.eikNextSample = times[times.length - 1]! + step;
     const nE = rig.electrodes.length;
     const data = new Float32Array(times.length * nE);
-    const fields = rig.rows();
     const cl = this.config.sinusCl;
+    const moving = this.movingFields();
+    const vmU = new Float32Array(moving.union.length);
     times.forEach((t, s) => {
       const k = cl > 0 ? Math.round((((t % cl) + cl) % cl) / step) % tab.len : Math.min(tab.len - 1, Math.round(t / step));
       tab.rows.forEach((r, j) => (data[s * nE + r] = tab.data[k * tab.rows.length + j]!));
-      rig.electrodes.forEach((e, r) => {
-        if (e.group !== 'map') return;
-        const f = fields[r]!;
+      // Each vertex in the union of the moving electrodes' supports is evaluated once per sample.
+      for (let j = 0; j < moving.union.length; j++) vmU[j] = this.eikVm(moving.union[j]!, t);
+      for (const m of moving.rows) {
         let acc = 0;
-        for (let q = 0; q < f.idx.length; q++) acc += f.w[q]! * this.eikVm(f.idx[q]!, t);
-        data[s * nE + r] = acc;
-      });
+        for (let q = 0; q < m.pos.length; q++) acc += m.w[q]! * vmU[m.pos[q]!]!;
+        data[s * nE + m.row] = acc;
+      }
     });
     return { times: Float64Array.from(times), data, rows: nE };
+  }
+
+  private movingCache: { version: number; union: Uint32Array; rows: Array<{ row: number; pos: Uint32Array; w: Float32Array }> } | null = null;
+
+  /** Lead fields of the moving (catheter) electrodes, re-indexed into the union of their supports. */
+  private movingFields(): NonNullable<SimEngine['movingCache']> {
+    const rig = this.rig!;
+    if (this.movingCache?.version === rig.version) return this.movingCache;
+    const fields = rig.rows();
+    const rowsIdx = rig.electrodes.map((e, i) => (e.group === 'map' || e.group === 'grid' ? i : -1)).filter((i) => i >= 0 && fields[i]!.idx.length > 0);
+    const where = new Map<number, number>();
+    for (const r of rowsIdx) for (const v of fields[r]!.idx) if (!where.has(v)) where.set(v, where.size);
+    const union = Uint32Array.from(where.keys());
+    const rows = rowsIdx.map((r) => ({ row: r, pos: Uint32Array.from(fields[r]!.idx, (v) => where.get(v)!), w: fields[r]!.w }));
+    this.movingCache = { version: rig.version, union, rows };
+    return this.movingCache;
   }
 
   private collect(samples: EgmSamples | null): void {
     if (!samples || !this.rig || !samples.times.length) return;
     const p = this.rig.process(samples);
-    if (p.n) this.egmChunks.push(p);
+    if (!p.n) return;
+    this.egmChunks.push(p);
+    this.extractBeats(p);
     // Bound memory if nobody drains (e.g. frames throttled): keep ≤ 10 s.
     let total = this.egmChunks.reduce((a, c) => a + c.n, 0);
     while (total > 10 * EGM_FS && this.egmChunks.length > 1) total -= this.egmChunks.shift()!.n;
@@ -453,15 +491,47 @@ export class SimEngine {
     this.post({ type: 'frame', t: this.now(), v, speed: this.speedMeasured, running: this.running, egm, roving }, egm ? [v.buffer, egm.data.buffer] : [v.buffer]);
   }
 
+  /** Feed processed samples to the beat extractor and post completed reference beats. */
+  private extractBeats(p: { t0: number; n: number; data: Float32Array }): void {
+    const rig = this.rig, ex = this.beats;
+    if (!rig || !ex) return;
+    const mapping = rig.mappingElectrodes();
+    const ii = rig.channels.findIndex((c) => c.name === 'II');
+    const need = [ex.refChannel, ii, ...mapping.flatMap((m) => [m.uni, m.bip])];
+    const slices = ex.push(p.t0, p.data, p.n, need);
+    const r = rig.rovingState();
+    if (!r) return;
+    for (const s of slices) {
+      const beat: BeatWindow = {
+        refTime: s.refTime,
+        cl: s.cl,
+        fs: s.fs,
+        preMs: s.preMs,
+        refName: rig.channels[ex.refChannel]!.name,
+        ref: s.data.get(ex.refChannel)!,
+        ecg: s.data.get(ii)!,
+        catheter: r.config.type,
+        contactVertex: r.vertex,
+        electrodes: mapping.map((m) => ({ name: m.name, position: [...(m.electrode === 0 && r.config.type === 'ablation' ? r.pose.tipEnd : r.pose.electrodes[m.electrode]!)], uni: s.data.get(m.uni)!, bip: s.data.get(m.bip)! })),
+        force: r.pose.force,
+        stability: r.stability,
+      };
+      const transfer = [beat.ref.buffer, beat.ecg.buffer, ...beat.electrodes.flatMap((e) => [e.uni.buffer, e.bip.buffer])];
+      this.post({ type: 'beat', beat }, [...new Set(transfer)] as Transferable[]);
+    }
+  }
+
   private drainEgm(): EgmChunk | null {
     if (!this.egmChunks.length || !this.rig) return null;
-    const nCh = this.rig.channels.length;
+    const all = this.rig.channels.length;
+    const sel = this.displayIdx;
+    const nCh = sel.length;
     const n = this.egmChunks.reduce((a, c) => a + c.n, 0);
     const data = new Float32Array(n * nCh);
     let off = 0;
     for (const c of this.egmChunks) {
-      data.set(c.data, off);
-      off += c.data.length;
+      for (let s = 0; s < c.n; s++) for (let j = 0; j < nCh; j++) data[off + s * nCh + j] = c.data[s * all + sel[j]!]!;
+      off += c.n * nCh;
     }
     const t0 = this.egmChunks[0]!.t0;
     this.egmChunks = [];

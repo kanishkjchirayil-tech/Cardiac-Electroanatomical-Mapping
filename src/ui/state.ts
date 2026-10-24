@@ -7,7 +7,7 @@ import { DEFAULT_ROVING, type RovingConfig } from '../core/catheter/roving';
 import { DEFAULT_SIGNALS, type SignalSettings } from '../core/signals/recording';
 import type { RestitutionResult } from '../core/ep/calibrate';
 
-export type Overlay = 'shell' | 'regions' | 'thickness';
+export type Overlay = 'shell' | 'regions' | 'thickness' | 'map';
 
 export const mesh = signal<SurfaceMesh | null>(null);
 export const quality = signal<MeshQuality | null>(null);
@@ -58,3 +58,5 @@ export const signalSettings = signal<SignalSettings>(DEFAULT_SIGNALS);
 export const motionEnabled = signal(true);
 /** Bumped when new EGM samples arrive. */
 export const egmVersion = signal(0);
+/** CS bipole used as the timing reference (EGM panel, beat detection and mapping). */
+export const referenceChannel = signal('CS 7-8');

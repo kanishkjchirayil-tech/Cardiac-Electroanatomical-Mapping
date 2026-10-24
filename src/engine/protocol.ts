@@ -3,7 +3,7 @@ import type { PresetId } from '../core/ep/tissue';
 import type { IonicModelId } from '../core/ep/ionic';
 import type { FibrosisPattern } from '../core/ep/substrate';
 import type { RestitutionResult } from '../core/ep/calibrate';
-import type { RovingConfig } from '../core/catheter/roving';
+import type { CatheterType, RovingConfig } from '../core/catheter/roving';
 import type { ChannelDef, SignalSettings } from '../core/signals/recording';
 
 export type SimMode = 'eikonal' | 'rd';
@@ -75,7 +75,28 @@ export interface RovingFrame {
   normal: number[];
   force: number;
   gap: number;
-  stability: { positionSd: number; forceMean: number; forceMin: number; forceMax: number; stable: boolean };
+  stability: { positionSd: number; forceMean: number; forceMin: number; forceMax: number; stable: boolean; settling: boolean };
+}
+
+/**
+ * One reference beat as seen by the recording system (MODEL.md §4.2): windows of the reference
+ * bipole, ECG II and every mapping electrode's unipolar and bipolar signal, aligned so that the
+ * reference activation is at `preMs` into each window, plus the catheter state at that time.
+ */
+export interface BeatWindow {
+  refTime: number;
+  /** Reference cycle length (ms) preceding this beat; NaN for the first. */
+  cl: number;
+  fs: number;
+  preMs: number;
+  refName: string;
+  ref: Float32Array;
+  ecg: Float32Array;
+  catheter: CatheterType;
+  contactVertex: number;
+  electrodes: Array<{ name: string; position: number[]; uni: Float32Array; bip: Float32Array }>;
+  force: number;
+  stability: { positionSd: number; forceMin: number; forceMax: number; stable: boolean; settling?: boolean };
 }
 
 /** Processed channel samples: n × nCh row-major, uniform spacing 1/fs starting at t0 (ms). */
@@ -99,7 +120,8 @@ export type ToWorker =
   | { type: 'placeRoving'; vertex: number }
   | { type: 'rovingConfig'; config: Partial<RovingConfig> }
   | { type: 'signals'; settings: SignalSettings }
-  | { type: 'motion'; enabled: boolean };
+  | { type: 'motion'; enabled: boolean }
+  | { type: 'setReference'; name: string };
 
 export type FromWorker =
   | { type: 'status'; message: string }
@@ -107,4 +129,5 @@ export type FromWorker =
   | { type: 'frame'; t: number; v: Float32Array; speed: number; running: boolean; egm: EgmChunk | null; roving: RovingFrame | null }
   | { type: 'activation'; t: number; last: Float32Array; beatStart: number; fibrotic: Uint8Array }
   | { type: 'lab'; preset: PresetId; ionic: IonicModelId; D0: number; cv: number; apd90: number; restitution: RestitutionResult }
+  | { type: 'beat'; beat: BeatWindow }
   | { type: 'error'; message: string };

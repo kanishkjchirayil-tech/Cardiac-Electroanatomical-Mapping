@@ -21,5 +21,6 @@ ctx.onmessage = (e: MessageEvent<ToWorker>) => {
     case 'rovingConfig': void engine.setRovingConfig(m.config); break;
     case 'signals': void engine.setSignals(m.settings); break;
     case 'motion': void engine.setMotion(m.enabled); break;
+    case 'setReference': void engine.setReference(m.name); break;
   }
 };

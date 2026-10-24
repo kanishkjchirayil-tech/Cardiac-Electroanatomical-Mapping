@@ -1,4 +1,5 @@
 import { V_PEAK_MV, V_REST_MV } from '../ep/ionic';
+import { SpatialGrid } from '../mesh/spatial';
 
 /**
  * Volume-conductor lead fields for extracellular potentials (MODEL.md §3.1).
@@ -19,6 +20,8 @@ export interface SourceGeometry {
   basisGrad: Float32Array;
   /** Effective source volume per triangle (mm³): area × viable thickness × coupling. */
   volume: Float32Array;
+  /** Spatial index of the source points (for cutoff queries). */
+  grid: SpatialGrid;
 }
 
 export interface SourceOptions {
@@ -72,7 +75,7 @@ export function buildSourceGeometry(positions: Float32Array, indices: Uint32Arra
     center[3 * f + 1] = cy + (ny / nl) * (t / 2);
     center[3 * f + 2] = cz + (nz / nl) * (t / 2);
   }
-  return { nV: positions.length / 3, indices, center, basisGrad, volume };
+  return { nV: positions.length / 3, indices, center, basisGrad, volume, grid: new SpatialGrid(center, 10) };
 }
 
 /** Sparse lead field: φ = Σ w[i] · v[idx[i]] (mV), with v the normalized transmembrane variable. */
@@ -98,10 +101,13 @@ const MV_PER_V = V_PEAK_MV - V_REST_MV;
 export function buildLeadField(src: SourceGeometry, x: [number, number, number], opts: LeadFieldOptions, scratch?: Float64Array): LeadField {
   const acc = scratch && scratch.length >= src.nV ? scratch : new Float64Array(src.nV);
   const touched: number[] = [];
-  const nF = src.volume.length;
   const c2 = opts.cutoff * opts.cutoff;
   const I = src.indices;
-  for (let f = 0; f < nF; f++) {
+  // Finite cutoff: visit only nearby sources via the spatial index.
+  const faces = Number.isFinite(opts.cutoff) ? src.grid.within(x, opts.cutoff) : null;
+  const nF = faces ? faces.length : src.volume.length;
+  for (let q = 0; q < nF; q++) {
+    const f = faces ? faces[q]! : q;
     const vol = src.volume[f]!;
     if (vol === 0) continue;
     const dx = x[0] - src.center[3 * f]!, dy = x[1] - src.center[3 * f + 1]!, dz = x[2] - src.center[3 * f + 2]!;

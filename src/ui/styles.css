@@ -179,6 +179,29 @@ fieldset.band { flex: 1; border: 1px solid var(--line); border-radius: 6px; padd
 fieldset.band legend { font-size: 11px; color: var(--muted); padding: 0 4px; }
 .band-row { display: flex; align-items: center; gap: 4px; }
 
+/* Mapping panel */
+.segmented.wrap { flex-wrap: wrap; }
+.segmented.wrap button { flex: 1 0 30%; }
+.wrap-row { flex-wrap: wrap; }
+.beat-status { margin: 6px 0 2px; }
+.beat-status.ok { color: #45c46b; }
+.beat-status.warn { color: var(--warn); }
+.panel details { margin: 6px 0; }
+.panel summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; }
+.point-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.point-actions button { font-size: 11px; padding: 3px 7px; }
+.point-actions button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.point-list { max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.point-list table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.point-list th { position: sticky; top: 0; background: var(--panel); text-align: left; color: var(--muted); font-weight: 600; padding: 3px 4px; }
+.point-list td { padding: 2px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+.point-list tr { cursor: pointer; }
+.point-list tr.sel { background: rgba(45, 212, 191, 0.18); }
+.point-list tr.dim { color: var(--muted); }
+.inspector { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+.inspector-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.inspector-canvas { width: 100%; height: 150px; display: block; border-radius: 6px; margin: 6px 0; cursor: crosshair; }
+
 @media (max-width: 800px) {
   .app { grid-template-columns: 1fr; grid-template-rows: 48px auto auto 28px; grid-template-areas: 'top' 'main' 'side' 'status'; height: auto; min-height: 100%; }
   .main-area .viewport { flex: 0 0 auto; height: 55vh; }

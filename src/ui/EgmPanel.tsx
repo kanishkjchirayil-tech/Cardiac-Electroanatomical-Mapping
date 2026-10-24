@@ -3,6 +3,7 @@ import { useSignalEffect } from '@preact/signals';
 import { cycleLength, detectActivations } from '../core/signals/detect';
 import type { ChannelDef } from '../core/signals/recording';
 import { egmStore } from './sim-client';
+import * as C from './sim-client';
 import * as S from './state';
 
 const SWEEPS = [25, 50, 100, 200];
@@ -23,14 +24,20 @@ export function EgmPanel() {
   const [gain, setGain] = useState(DEFAULT_GAIN);
   const [frozenAt, setFrozenAt] = useState<number | null>(null);
   const [calipers, setCalipers] = useState<{ a: number; b: number } | null>(null);
-  const [refName, setRefName] = useState('CS 7-8');
+  const refName = S.referenceChannel.value;
   const [cl, setCl] = useState<number>(NaN);
   const rig = S.rigInfo.value;
-  const channels = rig?.channels ?? [];
+  const allChannels = rig?.channels ?? [];
+  const activeType = S.roving.value?.config.type ?? 'ablation';
+  // Rows shown: everything except channels of the inactive mapping catheter.
+  const rows = allChannels.map((c, i) => ({ c, i })).filter((x) => !x.c.catheter || x.c.catheter === activeType);
+  const channels = allChannels;
   const view = useRef({ tRight: 0, widthMs: 1000 });
   const state = useRef({ sweep, gain, frozenAt, calipers });
   state.current = { sweep, gain, frozenAt, calipers };
   const raf = useRef(0);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
   /**
    * Incremental sweep rendering: pixel column c shows the min–max envelope of samples in
@@ -60,7 +67,8 @@ export function EgmPanel() {
     const lastCol = Math.floor(tRight * pxPerMs);
     const firstCol = lastCol - traceW + 1;
     view.current = { tRight: (lastCol + 1) / pxPerMs, widthMs: traceW / pxPerMs };
-    const key = `${W}x${H}:${dpr}:${st.sweep}:${JSON.stringify(st.gain)}:${channels.length}:${egmStore.t0}:${st.frozenAt}`;
+    const rowsNow = rowsRef.current;
+    const key = `${W}x${H}:${dpr}:${st.sweep}:${JSON.stringify(st.gain)}:${rowsNow.map((r) => r.i).join(',')}:${egmStore.t0}:${st.frozenAt}`;
     const ctx = cv.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const bg = getComputedStyle(cv).getPropertyValue('--egm-bg').trim() || '#090f14';
@@ -83,7 +91,7 @@ export function EgmPanel() {
     const x0 = LABEL_W + (from - firstCol);
     ctx.fillStyle = bg;
     ctx.fillRect(x0, 0, W - x0, H);
-    const n = channels.length;
+    const n = rowsNow.length;
     if (!n) return;
     const rowH = (H - 16) / n;
     // Time grid for the new columns.
@@ -102,10 +110,10 @@ export function EgmPanel() {
       }
     }
     const fs = egmStore.fs;
-    for (let c = 0; c < n; c++) {
-      const ch = channels[c]!;
+    for (let row = 0; row < n; row++) {
+      const ch = rowsNow[row]!.c, c = rowsNow[row]!.i;
       const gk = gainKey(ch);
-      const y0 = rowH * (c + 0.5);
+      const y0 = rowH * (row + 0.5);
       const k = st.gain[gk] * PX_PER_MM;
       const top = y0 - rowH * 0.95, bot = y0 + rowH * 0.95;
       if (from === firstCol) {
@@ -167,7 +175,7 @@ export function EgmPanel() {
     void S.rigInfo.value;
     schedule();
   });
-  useEffect(schedule, [sweep, gain, frozenAt, calipers]);
+  useEffect(schedule, [sweep, gain, frozenAt, calipers, activeType]);
   useEffect(() => {
     const ro = new ResizeObserver(schedule);
     if (canvasRef.current) ro.observe(canvasRef.current);
@@ -221,7 +229,7 @@ export function EgmPanel() {
           {frozenAt !== null ? 'Live' : 'Freeze'}
         </button>
         <label class="inline">Ref
-          <select id="egm-ref" value={refName} onChange={(e) => setRefName(e.currentTarget.value)}>
+          <select id="egm-ref" value={refName} onChange={(e) => C.setReference(e.currentTarget.value)}>
             {csNames.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
         </label>

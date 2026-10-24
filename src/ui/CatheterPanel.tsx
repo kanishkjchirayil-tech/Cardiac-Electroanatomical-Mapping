@@ -11,6 +11,11 @@ export function CatheterPanel() {
   return (
     <section class="panel">
       <h2>Roving catheter</h2>
+      <div class="segmented" role="radiogroup" aria-label="Catheter type">
+        {([['ablation', 'Ablation (4-pole)'], ['grid', 'HD grid (16)']] as const).map(([k, label]) => (
+          <button key={k} id={`cath-${k}`} role="radio" aria-checked={cfg.type === k} class={cfg.type === k ? 'on' : ''} onClick={() => C.setRovingConfig({ type: k })}>{label}</button>
+        ))}
+      </div>
       <p class="muted small">Click the shell to place the tip · Shift-drag to slide it · Arrow keys nudge 2 mm (Shift: 0.5 mm) · [ ] change force</p>
       <label>Contact force {cfg.force} g
         <input id="cath-force" type="range" min={0} max={60} step={1} value={cfg.force} onInput={(e) => C.setRovingConfig({ force: Number(e.currentTarget.value) })} />
@@ -36,7 +41,7 @@ export function CatheterPanel() {
           <div class="force-readout" aria-live="polite">
             <div class="force-bar"><div style={{ width: `${Math.min(100, (r.force / 60) * 100)}%` }} class={r.force < 5 ? 'low' : r.force > 40 ? 'high' : 'ok'} /></div>
             <span class="force-num">{r.force.toFixed(0)} g</span>
-            <span class={`chip ${st.stable ? 'chip-ok' : 'chip-warn'}`}>{st.stable ? 'Stable' : 'Unstable'}</span>
+            <span class={`chip ${st.stable ? 'chip-ok' : 'chip-warn'}`}>{st.stable ? 'Stable' : st.settling ? 'Settling' : 'Unstable'}</span>
           </div>
           <dl class="stats">
             <dt>Location</dt><dd>{m ? REGIONS[m.region[r.vertex]!]?.name : '—'}</dd>

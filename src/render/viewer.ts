@@ -36,6 +36,13 @@ export class Viewer {
   /** Shift-drag across the shell (continuous). */
   onDrag: ((h: HoverInfo) => void) | null = null;
   readonly catheters = new CatheterView();
+  /** Click on an acquired-point marker. */
+  onPointSelect: ((id: number) => void) | null = null;
+  private pointMesh: THREE.InstancedMesh | null = null;
+  private pointIds: number[] = [];
+  private readonly selectRing = new THREE.Mesh(new THREE.SphereGeometry(1.5, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.85, depthTest: false }));
+  private cvLines: THREE.LineSegments | null = null;
+  private fullIndex: THREE.BufferAttribute | null = null;
   private readonly ghostScene = new THREE.Scene();
 
   private readonly container: HTMLElement;
@@ -110,6 +117,9 @@ export class Viewer {
     });
     this.scene.add(this.loopLines);
     this.scene.add(this.catheters.group);
+    this.selectRing.visible = false;
+    this.selectRing.renderOrder = 5;
+    this.scene.add(this.selectRing);
     this.ghostScene.add(this.catheters.ghost);
 
     this.controls = new TrackballControls(this.camera, this.renderer.domElement);
@@ -157,8 +167,12 @@ export class Viewer {
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
       if (down.shift) this.controls.enabled = true;
       else if (moved < 5 && performance.now() - down.t < 400) {
-        const h = this.hitAt(ndc(e));
-        if (h) this.onSelect?.(h);
+        const id = this.pointAt(ndc(e));
+        if (id !== null) this.onPointSelect?.(id);
+        else {
+          const h = this.hitAt(ndc(e));
+          if (h) this.onSelect?.(h);
+        }
       }
       down = null;
     });
@@ -180,6 +194,7 @@ export class Viewer {
     g.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
     g.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
     g.computeBoundingSphere();
+    this.fullIndex = null;
     this.shell = new THREE.Mesh(g, this.material);
     this.wire = new THREE.Mesh(g, this.wireMaterial);
     this.wire.visible = this.wireVisible;
@@ -399,6 +414,75 @@ export class Viewer {
       if (d < bestD) { bestD = d; best = v; }
     }
     return { vertex: best, point: [hit.point.x, hit.point.y, hit.point.z] };
+  }
+
+  /** Acquired points as small spheres coloured by their map value (sRGB 0–1). */
+  setPoints(points: Array<{ id: number; position: number[]; color: [number, number, number]; excluded: boolean }>, selected: number | null): void {
+    if (this.pointMesh) {
+      this.scene.remove(this.pointMesh);
+      this.pointMesh.dispose();
+      this.pointMesh = null;
+    }
+    this.pointIds = points.map((p) => p.id);
+    this.selectRing.visible = false;
+    if (points.length) {
+      const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.7, 10, 8), new THREE.MeshBasicMaterial(), points.length);
+      const m = new THREE.Matrix4(), c = new THREE.Color();
+      points.forEach((p, i) => {
+        m.makeScale(p.excluded ? 0.6 : 1, p.excluded ? 0.6 : 1, p.excluded ? 0.6 : 1).setPosition(p.position[0]!, p.position[1]!, p.position[2]!);
+        mesh.setMatrixAt(i, m);
+        c.setRGB(...(p.excluded ? ([0.55, 0.55, 0.58] as [number, number, number]) : p.color), THREE.SRGBColorSpace);
+        mesh.setColorAt(i, c);
+        if (p.id === selected) {
+          this.selectRing.position.set(p.position[0]!, p.position[1]!, p.position[2]!);
+          this.selectRing.visible = true;
+        }
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this.pointMesh = mesh;
+      this.scene.add(mesh);
+    }
+    this.dirty = true;
+  }
+
+  private pointAt(p: THREE.Vector2): number | null {
+    if (!this.pointMesh) return null;
+    this.raycaster.setFromCamera(p, this.camera);
+    const hit = this.raycaster.intersectObject(this.pointMesh, false)[0];
+    return hit && hit.instanceId !== undefined ? this.pointIds[hit.instanceId] ?? null : null;
+  }
+
+  /** Conduction-velocity arrows (flat segment endpoints), or null to hide. */
+  setCvArrows(segments: Float32Array | null): void {
+    if (this.cvLines) {
+      this.scene.remove(this.cvLines);
+      this.cvLines.geometry.dispose();
+      this.cvLines = null;
+    }
+    if (segments && segments.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(segments, 3));
+      this.cvLines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }));
+      this.scene.add(this.cvLines);
+    }
+    this.dirty = true;
+  }
+
+  /** Anatomy-build mode: draw only triangles whose three vertices are revealed (null = all). */
+  setVisibleMask(mask: Uint8Array | null): void {
+    if (!this.shell) return;
+    const g = this.shell.geometry;
+    this.fullIndex ??= g.getIndex();
+    if (!mask || !this.fullIndex) {
+      if (this.fullIndex) g.setIndex(this.fullIndex);
+    } else {
+      const src = this.fullIndex.array as Uint32Array;
+      const out: number[] = [];
+      for (let t = 0; t < src.length; t += 3) if (mask[src[t]!] && mask[src[t + 1]!] && mask[src[t + 2]!]) out.push(src[t]!, src[t + 1]!, src[t + 2]!);
+      g.setIndex(new THREE.BufferAttribute(Uint32Array.from(out), 1));
+    }
+    this.dirty = true;
   }
 
   setCsCatheter(path: number[], electrodes: number[], transseptal: number[]): void {

@@ -68,7 +68,7 @@ describe('electrogram streaming', () => {
     await h.engine.init(mesh, { ...DEFAULT_SIM_CONFIG, mode: 'eikonal' });
     const ready = h.last('ready')!;
     const nCh = ready.rig.channels.length;
-    expect(ready.rig.channels.map((c) => c.name)).toEqual(['I', 'II', 'V1', 'CS 9-10', 'CS 7-8', 'CS 5-6', 'CS 3-4', 'CS 1-2', 'MAP 1-2', 'MAP 3-4', 'MAP 1 uni', 'MAP 2 uni']);
+    expect(ready.rig.channels.map((c) => c.name)).toEqual(['I', 'II', 'V1', 'CS 9-10', 'CS 7-8', 'CS 5-6', 'CS 3-4', 'CS 1-2', 'MAP 1-2', 'MAP 3-4', 'MAP 1 uni', 'MAP 2 uni', 'G1-2', 'G5-6', 'G9-10', 'G13-14', 'G1 uni']);
     h.msgs.length = 0;
     await h.engine.step(500);
     await h.engine.step(500);

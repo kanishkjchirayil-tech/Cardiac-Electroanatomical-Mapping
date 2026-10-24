@@ -7,6 +7,10 @@ import { initSimulation, latestVm } from './sim-client';
 import { SimPanel } from './SimPanel';
 import { CatheterPanel, SignalsPanel } from './CatheterPanel';
 import { EgmPanel } from './EgmPanel';
+import { MappingPanel } from './MappingPanel';
+import * as M from './mapping-state';
+import { computeMap, cvArrows, mapColors, type MapProduct } from './map-compute';
+import { signal } from '@preact/signals';
 import * as C from './sim-client';
 import { walkOnSurface } from '../core/catheter/navigate';
 import { vertexAdjacency, type Adjacency } from '../core/mesh/topology';
@@ -22,6 +26,11 @@ const THICKNESS_RANGE: [number, number] = [0.5, 3.0];
 const NARROW = typeof window !== 'undefined' && window.matchMedia('(max-width: 800px)').matches;
 
 let teacherBuf = new Float32Array(0);
+let mapBuf = new Float32Array(0);
+/** Latest map product (recomputed when points or map settings change). */
+let currentMap: MapProduct | null = null;
+const mapProductVersion = signal(0);
+const propagationPhase = signal(0);
 let adjacency: Adjacency | null = null;
 
 /** Range of the true activation map for the most recent beat (teacher view only). */
@@ -71,6 +80,12 @@ function colorsFor(): Float32Array | null {
     case 'shell': return shellColors(m.region.length);
     case 'regions': return regionColors(m.region, S.highlightRegion.value);
     case 'thickness': return scalarColors(m.wallThickness, THICKNESS_RANGE[0], THICKNESS_RANGE[1]);
+    case 'map': {
+      void mapProductVersion.value;
+      if (!currentMap) return shellColors(m.region.length);
+      if (mapBuf.length !== 3 * m.region.length) mapBuf = new Float32Array(3 * m.region.length);
+      return mapColors(currentMap, mapBuf, currentMap.type === 'propagation' ? propagationPhase.value : undefined);
+    }
   }
 }
 
@@ -125,6 +140,7 @@ export function App() {
     v.onHover = (h) => (S.hover.value = h);
     v.onFps = (f) => (S.fps.value = f);
     v.onSelect = (h) => C.placeRoving(h.vertex);
+    v.onPointSelect = (id) => (M.selectedPoint.value = id);
     let lastDrag = -1;
     v.onDrag = (h) => {
       if (h.vertex !== lastDrag) C.placeRoving((lastDrag = h.vertex));
@@ -150,6 +166,16 @@ export function App() {
       } else if (e.key === '[' || e.key === ']') {
         const f = S.rovingConfig.peek().force + (e.key === ']' ? 5 : -5);
         C.setRovingConfig({ force: Math.max(0, Math.min(60, f)) });
+      } else if (e.key === 'p' || e.key === 'P') {
+        if (M.acquireNow()) S.overlay.value = 'map';
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && M.selectedPoint.peek() !== null && M.session) {
+        M.session.remove([M.selectedPoint.peek()!]);
+        M.selectedPoint.value = null;
+        M.bump();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && M.session?.canUndo()) {
+        e.preventDefault();
+        M.session.undo();
+        M.bump();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -184,6 +210,49 @@ export function App() {
     if (r) viewer.current?.setCsCatheter(r.csPath, r.csElectrodes, r.transseptal);
   });
   useSignalEffect(() => viewer.current?.setRoving(S.roving.value));
+  // Map products: recompute when points, settings or map display change.
+  useSignalEffect(() => {
+    void M.mapVersion.value;
+    const disp = M.mapDisplay.value;
+    void S.mesh.value;
+    currentMap = M.session && M.session.points.length ? computeMap(disp.type) : null;
+    mapProductVersion.value++;
+  });
+  useSignalEffect(() => {
+    void mapProductVersion.value;
+    const v = viewer.current, s = M.session, m = S.mesh.value;
+    const disp = M.mapDisplay.value;
+    const sel = M.selectedPoint.value;
+    if (!v || !m) return;
+    const pts = s && disp.showPoints ? s.points : [];
+    v.setPoints(pts.map((p) => ({
+      id: p.id,
+      position: [0, 1, 2].map((k) => m.positions[3 * p.vertex + k]!),
+      color: currentMap?.pointColor.get(p.id) ?? [0.8, 0.8, 0.8],
+      excluded: p.excluded || p.projectionDistance > (s?.settings.projectionCutoff ?? Infinity),
+    })), sel);
+    const showCv = disp.cvVectors && currentMap && (currentMap.type === 'lat' || currentMap.type === 'propagation');
+    v.setCvArrows(showCv ? cvArrows(m, currentMap!.values) : null);
+  });
+  useSignalEffect(() => {
+    void M.revealedVersion.value;
+    viewer.current?.setVisibleMask(M.anatomyBuild.value ? M.revealed : null);
+  });
+  // Propagation animation: sweep the phase through the LAT range (≈ 2.5 s per cycle).
+  useSignalEffect(() => {
+    void mapProductVersion.value;
+    if (S.overlay.value !== 'map' || M.mapDisplay.value.type !== 'propagation' || !currentMap) return;
+    const [lo, hi] = currentMap.range;
+    let raf = 0;
+    const t0 = performance.now();
+    const loop = (now: number) => {
+      const span = hi - lo + 40;
+      propagationPhase.value = lo - 10 + (((now - t0) / 2500) * span) % span;
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  });
   useSignalEffect(() => {
     void S.mesh.value;
     adjacency = null;
@@ -204,6 +273,7 @@ export function App() {
       <aside class="sidebar">
         <SimPanel />
         <CatheterPanel />
+        <MappingPanel />
         <SignalsPanel />
         <AnatomyPanel />
         <DisplayPanel />
@@ -266,7 +336,7 @@ function AnatomyPanel() {
 }
 
 function DisplayPanel() {
-  const opts: Array<[S.Overlay, string]> = [['shell', 'Shell'], ['regions', 'Regions'], ['thickness', 'Wall thickness']];
+  const opts: Array<[S.Overlay, string]> = [['map', 'Map'], ['shell', 'Shell'], ['regions', 'Regions'], ['thickness', 'Thickness']];
   return (
     <Panel title="Display">
       <div class="segmented" role="radiogroup" aria-label="Overlay">
@@ -345,6 +415,27 @@ function ViewToolbar({ viewer }: { viewer: { current: Viewer | null } }) {
 function Legend() {
   const m = S.mesh.value;
   if (!m) return null;
+  void mapProductVersion.value;
+  if (!S.teacherView.value && S.overlay.value === 'map') {
+    const mp = currentMap;
+    const t = M.mapDisplay.value.type;
+    const title = { lat: 'Local activation time (ms)', propagation: 'Propagation (LAT, ms)', bipolar: 'Bipolar voltage (mV)', unipolar: 'Unipolar voltage (mV)', fractionation: 'Fractionation (deflections)' }[t];
+    const gradient = t === 'fractionation' ? cssGradient((x) => latColor(1 - x)) : cssGradient(latColor);
+    return (
+      <details class="legend" open={!NARROW}>
+        <summary class="legend-title">{title}</summary>
+        {mp ? (
+          <>
+            <div class="bar" style={{ background: gradient }} />
+            <div class="bar-labels"><span>{mp.range[0].toFixed(t === 'lat' || t === 'propagation' ? 0 : 2)}</span><span>{mp.range[1].toFixed(t === 'lat' || t === 'propagation' ? 0 : 2)}</span></div>
+            {(t === 'bipolar' || t === 'unipolar') && <div class="legend-note"><span class="swatch" style={{ background: 'rgb(77,79,84)' }} /> below {mp.range[0]} mV (scar)</div>}
+            <div class="legend-note"><span class="swatch" style={{ background: 'rgb(158,158,163)' }} /> no data (beyond fill threshold)</div>
+            {(t === 'lat' || t === 'propagation') && <div class="legend-note">relative to {S.referenceChannel.value}</div>}
+          </>
+        ) : <p class="muted small">No points yet: acquire points (P) to build a map.</p>}
+      </details>
+    );
+  }
   if (S.teacherView.value) {
     const ov = S.teacherOverlay.value;
     if (ov === 'vm') {

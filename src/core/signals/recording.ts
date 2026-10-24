@@ -8,7 +8,7 @@ import { BIPOLAR_BAND, ECG_BAND, FilterChain, UNIPOLAR_BAND, type BandSpec } fro
  *   →  causal band-pass (+ optional notch) per channel.
  */
 export type ChannelKind = 'ecg' | 'bipolar' | 'unipolar';
-export type ElectrodeGroup = 'ecg' | 'cs' | 'map';
+export type ElectrodeGroup = 'ecg' | 'cs' | 'map' | 'grid';
 
 export interface ElectrodeDef {
   name: string;
@@ -19,6 +19,10 @@ export interface ChannelDef {
   name: string;
   kind: ChannelKind;
   group: ElectrodeGroup;
+  /** Shown in the EGM panel (others are mapping-only channels). */
+  display: boolean;
+  /** Mapping catheter the channel belongs to, if any. */
+  catheter?: 'ablation' | 'grid';
   /** Electrode index (positive input). */
   plus: number;
   /** Electrode index of the negative input, or −1 for the Wilson central terminal. */
@@ -82,25 +86,36 @@ export class RecordingSystem {
   }
 }
 
-/** Standard channel layout: ECG I, II, V1; CS 9-10 … CS 1-2; MAP 1-2, MAP 3-4 bipolar; MAP 1, MAP 2 unipolar. */
+/**
+ * Standard layout. Displayed: ECG I, II, V1; CS 9-10 … CS 1-2; ablation MAP 1-2, MAP 3-4, MAP 1 and
+ * MAP 2 unipolar; grid G1-2, G5-6, G9-10, G13-14 and G1 unipolar. Mapping-only: unipolar and
+ * row-bipolar channels for all 16 grid electrodes.
+ */
 export function standardLayout(): { electrodes: ElectrodeDef[]; channels: ChannelDef[] } {
   const electrodes: ElectrodeDef[] = [
     { name: 'RA', group: 'ecg' }, { name: 'LA', group: 'ecg' }, { name: 'LL', group: 'ecg' }, { name: 'V1', group: 'ecg' },
     ...Array.from({ length: 10 }, (_, i) => ({ name: `CS ${i + 1}`, group: 'cs' as const })),
     ...Array.from({ length: 4 }, (_, i) => ({ name: `MAP ${i + 1}`, group: 'map' as const })),
+    ...Array.from({ length: 16 }, (_, i) => ({ name: `G${i + 1}`, group: 'grid' as const })),
   ];
   const idx = (n: string) => electrodes.findIndex((e) => e.name === n);
   const channels: ChannelDef[] = [
-    { name: 'I', kind: 'ecg', group: 'ecg', plus: idx('LA'), minus: idx('RA') },
-    { name: 'II', kind: 'ecg', group: 'ecg', plus: idx('LL'), minus: idx('RA') },
-    { name: 'V1', kind: 'ecg', group: 'ecg', plus: idx('V1'), minus: -1 },
+    { name: 'I', kind: 'ecg', group: 'ecg', display: true, plus: idx('LA'), minus: idx('RA') },
+    { name: 'II', kind: 'ecg', group: 'ecg', display: true, plus: idx('LL'), minus: idx('RA') },
+    { name: 'V1', kind: 'ecg', group: 'ecg', display: true, plus: idx('V1'), minus: -1 },
   ];
-  for (let p = 9; p >= 1; p -= 2) channels.push({ name: `CS ${p}-${p + 1}`, kind: 'bipolar', group: 'cs', plus: idx(`CS ${p}`), minus: idx(`CS ${p + 1}`) });
+  for (let p = 9; p >= 1; p -= 2) channels.push({ name: `CS ${p}-${p + 1}`, kind: 'bipolar', group: 'cs', display: true, plus: idx(`CS ${p}`), minus: idx(`CS ${p + 1}`) });
+  const abl = { catheter: 'ablation' as const, group: 'map' as const, display: true };
   channels.push(
-    { name: 'MAP 1-2', kind: 'bipolar', group: 'map', plus: idx('MAP 1'), minus: idx('MAP 2') },
-    { name: 'MAP 3-4', kind: 'bipolar', group: 'map', plus: idx('MAP 3'), minus: idx('MAP 4') },
-    { name: 'MAP 1 uni', kind: 'unipolar', group: 'map', plus: idx('MAP 1'), minus: -1 },
-    { name: 'MAP 2 uni', kind: 'unipolar', group: 'map', plus: idx('MAP 2'), minus: -1 },
+    { name: 'MAP 1-2', kind: 'bipolar', ...abl, plus: idx('MAP 1'), minus: idx('MAP 2') },
+    { name: 'MAP 3-4', kind: 'bipolar', ...abl, plus: idx('MAP 3'), minus: idx('MAP 4') },
+    { name: 'MAP 1 uni', kind: 'unipolar', ...abl, plus: idx('MAP 1'), minus: -1 },
+    { name: 'MAP 2 uni', kind: 'unipolar', ...abl, plus: idx('MAP 2'), minus: -1 },
   );
+  for (let k = 1; k <= 16; k++) {
+    const partner = k % 4 === 0 ? k - 1 : k + 1;
+    channels.push({ name: `G${k}-${partner}`, kind: 'bipolar', group: 'grid', catheter: 'grid', display: (k - 1) % 4 === 0, plus: idx(`G${k}`), minus: idx(`G${partner}`) });
+  }
+  for (let k = 1; k <= 16; k++) channels.push({ name: `G${k} uni`, kind: 'unipolar', group: 'grid', catheter: 'grid', display: k === 1, plus: idx(`G${k}`), minus: -1 });
   return { electrodes, channels };
 }

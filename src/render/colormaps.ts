@@ -104,3 +104,15 @@ export function writeColors(out: Float32Array, n: number, f: (i: number) => RGB)
     out[3 * i + 2] = srgbToLinear(c[2]);
   }
 }
+
+/** Below the voltage scar threshold. */
+export const SCAR: RGB = [0.3, 0.31, 0.33];
+/** Beyond the fill threshold (no data). */
+export const NO_DATA: RGB = [0.62, 0.62, 0.64];
+
+/** Voltage map: scar grey below `scar`, red → purple between thresholds, purple above `normal`. */
+export function voltageMapColor(v: number, scar: number, normal: number): RGB {
+  if (!Number.isFinite(v)) return NO_DATA;
+  if (v < scar) return SCAR;
+  return latColor((v - scar) / Math.max(1e-6, normal - scar));
+}

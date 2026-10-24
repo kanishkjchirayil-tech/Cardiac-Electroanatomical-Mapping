@@ -26,6 +26,12 @@ export class CatheterView {
   private electrodes: THREE.Mesh[] = [];
   private electrodesGhost: THREE.Mesh[] = [];
   private arrow: THREE.ArrowHelper;
+  private grid = new THREE.Group();
+  private gridGhost = new THREE.Group();
+  private gridBeads: THREE.Mesh[] = [];
+  private gridBeadsGhost: THREE.Mesh[] = [];
+  private gridLines: THREE.LineSegments;
+  private gridLinesGhost: THREE.LineSegments;
   private transseptal = new THREE.Vector3();
 
   constructor() {
@@ -52,6 +58,21 @@ export class CatheterView {
     this.arrow.renderOrder = 10;
     this.rovGhost.add(this.arrow);
     this.rov.visible = this.rovGhost.visible = false;
+    // HD grid: 16 beads on a 4 × 4 spline frame.
+    const bead = new THREE.SphereGeometry(0.75, 10, 8);
+    for (let k = 0; k < 16; k++) {
+      const a = new THREE.Mesh(bead, solid(METAL, 0.35)), b = new THREE.Mesh(bead, ghost(METAL));
+      this.gridBeads.push(a);
+      this.gridBeadsGhost.push(b);
+      this.grid.add(a);
+      this.gridGhost.add(b);
+    }
+    this.gridLines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x8fb7d9 }));
+    this.gridLinesGhost = new THREE.LineSegments(this.gridLines.geometry, new THREE.LineBasicMaterial({ color: 0x8fb7d9, transparent: true, opacity: 0.4, depthTest: false }));
+    this.grid.add(this.gridLines);
+    this.gridGhost.add(this.gridLinesGhost);
+    this.rov.add(this.grid);
+    this.rovGhost.add(this.gridGhost);
   }
 
   setCs(path: number[], electrodes: number[]): void {
@@ -91,8 +112,22 @@ export class CatheterView {
     this.rov.visible = this.rovGhost.visible = show;
     if (!f) return;
     const axis = v3(f.axis), tipEnd = v3(f.tipEnd), normal = v3(f.normal);
+    const isGrid = f.config.type === 'grid';
+    this.grid.visible = this.gridGhost.visible = isGrid;
+    for (const m of [...this.electrodes, ...this.electrodesGhost]) m.visible = !isGrid;
+    if (isGrid) {
+      for (let k = 0; k < 16; k++) for (const m of [this.gridBeads[k]!, this.gridBeadsGhost[k]!]) m.position.copy(v3(f.electrodes, k));
+      const seg: number[] = [];
+      const push = (a: number, b: number) => seg.push(...f.electrodes.slice(3 * a, 3 * a + 3), ...f.electrodes.slice(3 * b, 3 * b + 3));
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 3; c++) { push(r * 4 + c, r * 4 + c + 1); push(c * 4 + r, (c + 1) * 4 + r); }
+      this.gridLines.geometry.dispose();
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3));
+      this.gridLines.geometry = g;
+      this.gridLinesGhost.geometry = g;
+    }
     const offs = electrodeOffsets(f.config.spacing);
-    const back = tipEnd.clone().addScaledVector(axis, offs[3]! + 1);
+    const back = isGrid ? tipEnd.clone().addScaledVector(axis, 2) : tipEnd.clone().addScaledVector(axis, offs[3]! + 1);
     // Shaft: from the transseptal entry, curving into the axis behind the proximal ring.
     const entryDir = back.clone().sub(this.transseptal).normalize();
     const pts = [
@@ -101,7 +136,7 @@ export class CatheterView {
       back.clone().addScaledVector(axis, 18),
       back.clone().addScaledVector(axis, 6),
       back,
-      tipEnd.clone().addScaledVector(axis, TIP_LENGTH),
+      ...(isGrid ? [] : [tipEnd.clone().addScaledVector(axis, TIP_LENGTH)]),
     ];
     this.shaft.geometry.dispose();
     this.shaft.geometry = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, CATHETER_RADIUS, 12, false);

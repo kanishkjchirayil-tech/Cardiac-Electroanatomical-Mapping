@@ -7,7 +7,11 @@ import { Rng } from '../rng';
  * from perpendicular towards an azimuth in the tangent plane; a motion model adds cardiac,
  * respiratory and drift displacement that shrinks with firmer contact.
  */
+export type CatheterType = 'ablation' | 'grid';
+
 export interface RovingConfig {
+  /** Mapping catheter: 4-electrode ablation catheter or 16-electrode HD grid. */
+  type: CatheterType;
   /** Target contact force, g. */
   force: number;
   /** Angle between the catheter axis and the wall normal, degrees (0 = perpendicular). */
@@ -18,7 +22,7 @@ export interface RovingConfig {
   spacing: [number, number, number];
 }
 
-export const DEFAULT_ROVING: RovingConfig = { force: 15, angle: 30, azimuth: 0, spacing: [2, 5, 2] };
+export const DEFAULT_ROVING: RovingConfig = { type: 'ablation', force: 15, angle: 30, azimuth: 0, spacing: [2, 5, 2] };
 export const SPACING_OPTIONS: Array<[number, number, number]> = [[2, 5, 2], [1, 6, 1], [2, 2, 2], [1, 4, 1]];
 
 export const TIP_LENGTH = 3.5;

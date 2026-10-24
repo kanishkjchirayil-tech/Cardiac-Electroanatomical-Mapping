@@ -9,7 +9,7 @@ milestone adds its own section. Sections marked *(planned)* are not implemented 
 - [1. Anatomy](#1-anatomy) — implemented (M1)
 - [2. Electrophysiology engine](#2-electrophysiology-engine) — implemented (M2)
 - [3. Catheters and signals](#3-catheters-and-signals) — implemented (M3)
-- [4. Mapping](#4-mapping) — *(planned, M4)*
+- [4. Mapping](#4-mapping) — implemented (M4)
 - [5. Ablation](#5-ablation) — *(planned, M5)*
 - [6. Pacing and scenarios](#6-pacing-and-scenarios) — *(planned, M6)*
 - [7. Autonomic module and dataset export](#7-autonomic-module-and-dataset-export) — *(planned, M7)*
@@ -587,7 +587,153 @@ Checked by `tests/egm.test.ts` on reaction–diffusion sinus beats:
 | CS activation sequence | proximal → distal in sinus rhythm (CS 9-10 ≈ 50 ms, CS 1-2 ≈ 95 ms after onset) |
 
 ## 4. Mapping
-*(planned, M4.)*
+
+Code: `src/core/mapping/` (annotation, session, interpolation, types), `src/core/signals/beats.ts`
+(reference beats), `src/core/catheter/grid.ts`, and `src/ui/map-compute.ts` (colours, CV arrows).
+
+**Ground-truth firewall.** The mapping module sees only what a recording system provides:
+electrogram windows aligned to a reference, plus catheter positions and readouts. It never reads
+simulated voltages or activation times. A test fails if any file in `src/core/mapping/` imports
+anything outside the mesh, math, filter, or detection utilities. Ground truth is used only by tests
+and the teacher view.
+
+### 4.1 Mapping catheters
+
+- **Ablation catheter (4-pole):** one point per beat, taken at the tip end. LAT comes from the tip
+  unipolar (MAP 1); voltage from the distal bipole (MAP 1-2).
+- **HD grid (generic, 16 electrodes):**
+  - Electrodes: 4 × 4, 1 mm each, 3 mm centre to centre.
+  - Placement: the grid lies flat in the tangent plane at the contact point, oriented by the
+    "direction" control. Each electrode snaps to the nearest surface vertex of its in-plane position
+    and sits off the wall by the contact gap plus 0.6 mm.
+  - Signals: each electrode yields one point per beat, with its own unipolar signal and a bipolar
+    signal formed with its row neighbour (the last column pairs backwards).
+  - Lead fields: grid electrodes use a 20 mm cutoff instead of 30 mm. Being in contact, their near
+    field dominates, and 16 moving lead fields stay affordable.
+
+### 4.2 Reference beats and acquisition
+
+The recording system (worker) detects the **reference** on a selectable CS bipole (default CS 7-8):
+
+- A sample is a candidate when |x| ≥ 40 % of the peak over the last 3 s (from 100 ms block maxima).
+- A candidate is confirmed after 15 ms with no larger value, with a 150 ms refractory window.
+
+For each reference it sends a **beat window**:
+
+- Content: ±350 ms of the reference, ECG II, and every mapping electrode's filtered unipolar and
+  bipolar signal.
+- Catheter state at that moment: electrode positions, force, and stability.
+- Cycle length: the interval from the previous reference.
+
+**Settling rule.** After the catheter is relocated, or its type changed, it counts as unstable for
+**1 s** of simulated time. That is longer than a 700 ms window, so no window can mix signals from two
+sites.
+
+**Manual acquisition** (button or `P`) takes every electrode of the latest beat.
+
+**Auto-acquisition** takes only electrodes that pass all of these (defaults, adjustable):
+
+| Criterion | Default |
+|---|---|
+| Catheter settled | required |
+| Tip-position SD over the last second | ≤ 1 mm |
+| Contact force throughout the last second | 5–40 g |
+| Beat CL vs reference CL (median of the last 8 beats) | within ±10 % |
+| Distance from the shell | ≤ 6 mm (projection cutoff) |
+| Distance from existing points | ≥ 2 mm |
+
+Each point is stored with its location, nearest shell vertex, projection distance, force, stability,
+CL, and its electrogram window. Re-annotation is always possible later.
+
+### 4.3 Annotation
+
+All times are relative to the reference, refined to the peak |ref| within ±20 ms of the nominal
+reference.
+
+- **Window of interest (WOI):** default −100 to +150 ms relative to the reference (adjustable). Only
+  samples inside it are annotated.
+- **LAT, default method:** the time of the steepest negative unipolar slope, max(−dV/dt), within the
+  WOI. The slope is the 5-point derivative
+  (−u_{i+2} + 8u_{i+1} − 8u_{i−1} + u_{i−2}) / (12 Δt) at 2 kHz, refined to sub-sample precision by
+  a parabola.
+- **LAT, optional method:** the time of peak |bipolar| within the WOI.
+- **Voltages:** bipolar and unipolar peak-to-peak within the WOI.
+- **Deflections:** alternating extrema of the bipolar signal, counted with hysteresis
+  h = max(10 % of bipolar peak-to-peak, 0.03 mV).
+- **Fractionation and double potentials.** Activity is the set of samples with |bip| above 15 % of
+  its peak.
+  - **Fractionated:** ≥ 6 deflections, or ≥ 50 ms of activity.
+  - **Double potential:** exactly two activity clusters, each ≥ 30 % of the maximum, separated by an
+    isoelectric gap of ≥ 30 ms.
+
+  These are simple, documented heuristics, not a vendor algorithm.
+- **Manual re-annotation:** click the point's electrogram in the inspector. The automatic annotation
+  is kept, and *Auto LAT* restores it. Changing the WOI or method re-annotates every automatic point.
+- **Point list:** points can be tagged (`scar`, `review`, `gap`), excluded, or deleted, with undo
+  (Ctrl+Z).
+
+### 4.4 Interpolation
+
+Inverse-distance weighting over **geodesic** distance:
+
+v(i) = Σ_p w_p v_p / Σ_p w_p,  with w_p = 1/(d_g(i, p) + 0.5 mm)²
+
+The sum runs over points with d_g ≤ the **fill threshold** (default 12 mm). Vertices beyond every
+point's fill radius stay gray ("no data").
+
+- **Geodesic distances:** each point's local distance field comes from truncated fast marching
+  (`GeodesicFmm`, unit speed; §2.6). It starts from the catheter location projected onto the tangent
+  plane of the nearest vertex, and is cached per point.
+- **Excluded from maps:** points farther than the **projection cutoff** (default 6 mm) from the
+  shell, and user-excluded points. Both are drawn as small gray markers.
+- **Colour ranges:**
+  - LAT: automatic range = 2nd–98th percentile of point LATs (robust to stray points); can be set
+    manually.
+  - Bipolar voltage: gray below the scar threshold, red → purple up to the normal threshold, purple
+    above. Defaults are 0.1 / 0.5 mV, the commonly used atrial dense-scar and low-voltage cut-offs
+    (e.g. Rolf et al. 2014).
+  - Unipolar voltage: defaults 0.5 / 2.5 mV. This is an educational choice; atrial unipolar
+    thresholds are less standardized.
+  - Fractionation: the deflection count, purple (≤ 2) → red (≥ 8).
+
+### 4.5 Derived displays
+
+- **Conduction-velocity vectors.** The gradient of the interpolated LAT on each triangle gives
+  direction and speed (CV = 1/|∇T|), shown as arrows.
+  - Thinned to about one arrow per 5 mm cell.
+  - Only 0.05–2.5 m/s is shown. Higher apparent speeds occur at breakthroughs and wavefront
+    collisions.
+- **Propagation.** The interpolated LAT map is dimmed, and a bright band sweeps through the LAT
+  range (2.5 s per cycle), marking vertices activated within the last 15 ms of the phase.
+- **Anatomy build.** The shell is revealed only where the catheter electrodes have passed (within
+  7 mm), imitating catheter-based geometry acquisition. The underlying mesh is the procedural one;
+  the geometry is not reconstructed from catheter positions.
+
+### 4.6 Validation
+
+`tests/mapping.test.ts`:
+
+- **Annotation (synthetic):**
+  - LAT within ±0.5 ms (unipolar) and ±2.5 ms (bipolar peak).
+  - WOI respected.
+  - Double potentials and fractionation detected; normal electrograms are not flagged.
+- **Interpolation:** reproduces a linear field between points; vertices beyond the fill threshold
+  stay unmapped.
+- **Session:** each auto-acquire filter rejects what it should, and manual acquire bypasses them.
+  Re-annotation, tags, delete, undo, and WOI changes all work.
+- **Dense map vs ground truth.** One reaction–diffusion sinus beat, with 250 ablation-catheter sites
+  from farthest-point sampling, the full noise and filter chain, CS 7-8 reference, and fill 15 mm.
+  It maps 100 % of the surface:
+
+  | Measure | Result | Requirement |
+  |---|---|---|
+  | Interpolated LAT vs true activation | **r = 0.998** | r > 0.95 |
+  | Earliest mapped site to the true origin | **2.6 mm** | ≤ 5 mm |
+  | Bipolar-peak annotation | r = 0.994 | — |
+- **End to end** (engine beat windows → auto-acquisition):
+  - Beats spanning a relocation are refused.
+  - Ablation-catheter LAT errors against eikonal ground truth: median < 2 ms, maximum < 6 ms.
+  - Grid catheter, 640 points (manual run): median 0.5 ms, maximum 1.7 ms.
 
 ## 5. Ablation
 *(planned, M5.)*
@@ -629,6 +775,19 @@ Checked by `tests/egm.test.ts` on reaction–diffusion sinus beats:
 - **Truncated far field.** Intracardiac lead fields sum sources within 30 mm only.
 - **Eikonal-mode signals** use a fixed action-potential template, so they are a little sharper than
   reaction–diffusion signals and show no rate-dependent changes.
+
+### Mapping (M4)
+- **Interpolation method.** Inverse-distance weighting is simple and transparent, but flattens
+  gradients between sparse points. Commercial systems use proprietary interpolation, and research
+  tools use Laplace or RBF methods.
+- **Point location.** Locations are the instantaneous electrode positions at the end of the beat
+  window. There is no respiratory gating or patch-based localization error model. Projection is to
+  the nearest vertex.
+- **Heuristic annotation.** Fractionation and double-potential detection are heuristic. There is no
+  LAT-coherence or "LAT histogram" tool, and no automatic rejection of far-field ventricular
+  signals (the model has no ventricles).
+- **Anatomy build** reveals the existing shell rather than reconstructing it, so catheter-geometry
+  errors are not simulated.
 
 ### Electrophysiology (M2), compared with bidomain models and real atria
 - **Monodomain, not bidomain.**
@@ -684,3 +843,4 @@ Checked by `tests/egm.test.ts` on reaction–diffusion sinus beats:
 26. Geddes LA, Baker LE. The specific resistance of biological material — a compendium of data for the biomedical engineer and physiologist. *Med Biol Eng* 1967;5:271–293.
 27. Plonsey R, Barr RC. *Bioelectricity: A Quantitative Approach*, 3rd ed. Springer, 2007 (volume-conductor dipole sources).
 28. Stevenson WG, Soejima K. Recording techniques for clinical electrophysiology. *J Cardiovasc Electrophysiol* 2005;16:1017–1022.
+29. Rolf S, Kircher S, Arya A, et al. Tailored atrial substrate modification based on low-voltage areas in catheter ablation of atrial fibrillation. *Circ Arrhythm Electrophysiol* 2014;7:825–833.
